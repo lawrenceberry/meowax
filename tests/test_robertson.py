@@ -1,3 +1,7 @@
+import json
+import shutil
+import subprocess
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -7,6 +11,18 @@ from solvers.rodas5 import solve as rodas5_solve
 from solvers.rodas5 import solve_ensemble as rodas5_solve_ensemble
 from solvers.scipy_bdf import solve as scipy_bdf_solve
 from solvers.scipy_bdf import solve_ensemble as scipy_bdf_solve_ensemble
+
+_JULIA_SCRIPT = "benchmarks/robertson_julia.jl"
+_HAS_JULIA = shutil.which("julia") is not None
+
+
+def _run_julia(n=2, timeout=300):
+    """Run the Julia GPU ensemble Robertson benchmark and return parsed JSON result."""
+    cmd = ["julia", _JULIA_SCRIPT, str(n)]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if result.returncode != 0:
+        raise RuntimeError(f"Julia failed:\n{result.stderr}")
+    return json.loads(result.stdout.strip())
 
 _STANDARD_PARAMS = jnp.array([0.04, 1e4, 3e7])
 _EXPECTED_FINAL = jnp.array([1.786592e-02, 7.274753e-08, 9.821340e-01])
@@ -161,3 +177,40 @@ def test_rodas5_ensemble_N(benchmark, params_batch):
     assert results.shape == (params_batch.shape[0], 3)
     # Conservation should hold for every member
     np.testing.assert_allclose(results.sum(axis=1), 1.0, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Julia / DiffEqGPU.jl GPU ensemble benchmarks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _HAS_JULIA, reason="Julia not installed")
+def test_julia_gpu_ensemble(benchmark):
+    """Ensemble (N=2): Julia GPURosenbrock23 + EnsembleGPUKernel (CUDA, Float64)."""
+    data = benchmark.pedantic(
+        lambda: _run_julia(2),
+        warmup_rounds=0,
+        rounds=1,
+    )
+    benchmark.extra_info["julia_elapsed"] = data["elapsed_seconds"]
+
+    assert data["converged"]
+    conservations = np.array(data["conservations"])
+    np.testing.assert_allclose(conservations, 1.0, atol=1e-6)
+
+
+@pytest.mark.skipif(not _HAS_JULIA, reason="Julia not installed")
+@pytest.mark.parametrize("N", [100])
+def test_julia_gpu_ensemble_N(benchmark, N):
+    """Ensemble (N=100): Julia GPURosenbrock23 + EnsembleGPUKernel (CUDA, Float64)."""
+    data = benchmark.pedantic(
+        lambda: _run_julia(N),
+        warmup_rounds=0,
+        rounds=1,
+    )
+    benchmark.extra_info["julia_elapsed"] = data["elapsed_seconds"]
+    benchmark.extra_info["n_trajectories"] = N
+
+    assert data["converged"]
+    conservations = np.array(data["conservations"])
+    np.testing.assert_allclose(conservations, 1.0, atol=1e-6)
