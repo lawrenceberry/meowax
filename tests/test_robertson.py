@@ -113,7 +113,7 @@ def test_scipy_bdf_ensemble_N(benchmark, params_batch):
     np.testing.assert_allclose(results.sum(axis=1), 1.0, atol=1e-6)
 
 
-@pytest.mark.parametrize("params_batch", [2, 100], indirect=True)
+@pytest.mark.parametrize("params_batch", [2, 100, 1000, 10000, 100_000], indirect=True)
 def test_rodas5_ensemble_N(benchmark, params_batch):
     results = benchmark.pedantic(
         lambda: rodas5_solve_ensemble(
@@ -138,7 +138,7 @@ def test_rodas5_ensemble_N(benchmark, params_batch):
 
 
 @pytest.mark.skipif(not _HAS_JULIA, reason="Julia not installed")
-@pytest.mark.parametrize("N", [2, 100])
+@pytest.mark.parametrize("N", [2, 100, 1000, 10000, 100_000])
 def test_julia_gpu_ensemble_N(benchmark, N):
     """Julia GPURosenbrock23 + EnsembleGPUKernel (CUDA, Float64)."""
     data = benchmark.pedantic(
