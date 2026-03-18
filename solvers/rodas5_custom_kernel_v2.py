@@ -8,9 +8,15 @@ The W-transformed variant is from Di Marzo (1993) and DISCO-EB (Hahn).
 8 stages with adaptive step size control. Pallas/Triton custom GPU kernel
 with 32 trajectories per block.
 
-The LU decomposition and forward/back substitution use jax.lax.fori_loop
-with Pallas Ref scratch memory and pl.ds dynamic indexing, producing compact
-compiled GPU loops instead of O(n^3) unrolled instructions.
+Stage vectors and arithmetic use Pallas Refs with fori_loop, producing compact
+compiled Triton IR whose code size is O(1) regardless of n_vars. The
+while_loop carries only (t, dt, step_count) — all vectors live in Refs.
+
+The LU decomposition and forward/back substitution also use fori_loop with
+Pallas Ref scratch memory and pl.ds dynamic indexing.
+
+An optional ode_ref_fn can be supplied for Ref-based ODE evaluation with
+fori_loop, further reducing compiled code size for large systems.
 
 Reference: https://github.com/SciML/DiffEqGPU.jl
 """
@@ -54,44 +60,108 @@ def _pad_cols_pow2(n_cols):
 
 
 # ---------------------------------------------------------------------------
-# Rodas5 step: fori_loop LU with Pallas Ref scratch memory
+# Rodas5 step: all vectors in Refs, stage arithmetic via fori_loop
 # ---------------------------------------------------------------------------
 
 
-def _make_rodas5_step(ode_fn, n_vars):
-    """Rodas5 step with fori_loop-based LU using Pallas Ref scratch memory.
+def _make_rodas5_step(ode_fn, ode_ref_fn, n_vars, n_params):
+    """Create Rodas5 step function with Ref-based stage vectors.
 
-    For systems where unrolling the O(n^3) LU decomposition would generate
-    too much Triton IR code (n_vars > 16). Uses fori_loop for compact
-    compiled GPU loops and Pallas Refs with pl.ds for dynamic matrix access.
+    Stage vectors k1..k8 are stored in k_ref, intermediate state in u_ref,
+    and ODE evaluations / linear solve RHS in x_ref. All per-element vector
+    arithmetic uses fori_loop for compact Triton IR.
+
+    The Jacobian is always computed via JVP on the tuple-based ode_fn.
+    Stage ODE evaluations use ode_ref_fn if available, else ode_fn wrapped
+    with Ref reads/writes.
     """
-    nv = n_vars  # Python int, promoted automatically in JAX arithmetic
+    nv = n_vars
+    np_ = n_params
 
-    def step(y, p, dt, w_ref, x_ref):
+    # -- Helper: evaluate ODE from src_ref, write result to dst_ref ----------
+    def _eval_F(src_ref, p_ref, dst_ref, c_ref):
+        if ode_ref_fn is not None:
+            ode_ref_fn(src_ref, p_ref, dst_ref, c_ref)
+        else:
+            y_t = tuple(src_ref.at[:, i][...] for i in range(nv))
+            p_t = tuple(p_ref.at[:, i][...] for i in range(np_))
+            dy = ode_fn(y_t, p_t)
+            for i in range(nv):
+                dst_ref.at[:, i][...] = dy[i]
+
+    # -- Helper: LU forward/back solve, copy result to k_ref ----------------
+    def _lu_solve(w_ref, x_ref, k_ref, stage):
+        """Solve (LU) x = rhs in-place on x_ref, copy result to k_ref[stage]."""
+
+        # Forward substitution
+        def fwd_row(i, carry):
+            def fwd_col(j, carry):
+                xi = x_ref.at[:, pl.ds(i, 1)][...][:, 0]
+                xj = x_ref.at[:, pl.ds(j, 1)][...][:, 0]
+                lij = w_ref.at[:, pl.ds(i * nv + j, 1)][...][:, 0]
+                x_ref.at[:, pl.ds(i, 1)][...] = (xi - lij * xj)[:, None]
+                return carry
+
+            return jax.lax.fori_loop(0, i, fwd_col, carry)
+
+        jax.lax.fori_loop(0, nv, fwd_row, jnp.int32(0))
+
+        # Back substitution
+        def bwd_row(i_rev, carry):
+            i = nv - 1 - i_rev
+
+            def bwd_col(j_off, carry):
+                j = i + 1 + j_off
+                xi = x_ref.at[:, pl.ds(i, 1)][...][:, 0]
+                xj = x_ref.at[:, pl.ds(j, 1)][...][:, 0]
+                uij = w_ref.at[:, pl.ds(i * nv + j, 1)][...][:, 0]
+                x_ref.at[:, pl.ds(i, 1)][...] = (xi - uij * xj)[:, None]
+                return carry
+
+            jax.lax.fori_loop(0, nv - 1 - i, bwd_col, carry)
+            xi = x_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            uii = w_ref.at[:, pl.ds(i * nv + i, 1)][...][:, 0]
+            x_ref.at[:, pl.ds(i, 1)][...] = (xi / uii)[:, None]
+            return carry
+
+        jax.lax.fori_loop(0, nv, bwd_row, jnp.int32(0))
+
+        # Copy result to k_ref at stage offset
+        off = stage * nv
+
+        def copy_k(i, carry):
+            val = x_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            k_ref.at[:, pl.ds(off + i, 1)][...] = val[:, None]
+            return carry
+
+        jax.lax.fori_loop(0, nv, copy_k, jnp.int32(0))
+
+    # -- Main step function --------------------------------------------------
+    def step(p_ref, dt, w_ref, x_ref, y_ref, k_ref, u_ref, c_ref):
+        """One Rodas5 step.  Reads state from y_ref, writes y_new to u_ref,
+        error estimate k8 to k_ref[7*nv:]."""
         dtgamma = dt * _gamma
         inv_dt = 1.0 / dt
         d = 1.0 / dtgamma
 
-        def F(y):
-            return ode_fn(y, p)
+        # --- Jacobian via JVP (trace-time unrolled, uses tuple-based ode_fn) ---
+        y_tuple = tuple(y_ref.at[:, i][...] for i in range(nv))
+        p_tuple = tuple(p_ref.at[:, i][...] for i in range(np_))
+        ones = y_tuple[0] * 0.0 + 1.0
 
-        F0 = F(y)
-
-        # Jacobian via JVP (trace-time unrolled, n_vars iterations)
-        ones = y[0] * 0.0 + 1.0
         J_cols = []
-        for j in range(n_vars):
+        for j in range(nv):
 
             def f_j(yj, j=j):
-                y_mod = tuple(yj if k == j else y[k] for k in range(n_vars))
-                return F(y_mod)
+                y_mod = tuple(yj if k == j else y_tuple[k] for k in range(nv))
+                return ode_fn(y_mod, p_tuple)
 
-            _, col = jax.jvp(f_j, (y[j],), (ones,))
+            _, col = jax.jvp(f_j, (y_tuple[j],), (ones,))
             J_cols.append(col)
 
-        # Fill W = I/(dt*gamma) - J into w_ref (static Python-int indexing)
-        for i_s in range(n_vars):
-            for j_s in range(n_vars):
+        # Fill W = I/(dt*gamma) - J into w_ref (trace-time unrolled)
+        for i_s in range(nv):
+            for j_s in range(nv):
                 val = -J_cols[j_s][i_s]
                 if i_s == j_s:
                     val = val + d
@@ -117,160 +187,163 @@ def _make_rodas5_step(ode_fn, n_vars):
 
         jax.lax.fori_loop(0, nv, lu_col, jnp.int32(0))
 
-        # --- Solve W @ x = b via LU stored in w_ref ---
-        def S(b_tuple):
-            # Store RHS in x_ref (static Python-int indexing)
-            for i_s in range(n_vars):
-                x_ref.at[:, i_s][...] = b_tuple[i_s]
+        # ====================== 8 Rodas5 stages ========================
 
-            # Forward substitution: z[i] -= L[i,j] * z[j] for j < i
-            def fwd_row(i, carry):
-                def fwd_col(j, carry):
-                    xi = x_ref.at[:, pl.ds(i, 1)][...][:, 0]
-                    xj = x_ref.at[:, pl.ds(j, 1)][...][:, 0]
-                    lij = w_ref.at[:, pl.ds(i * nv + j, 1)][...][:, 0]
-                    x_ref.at[:, pl.ds(i, 1)][...] = (xi - lij * xj)[:, None]
-                    return carry
+        # Stage 1: k1 = S(F(y))
+        _eval_F(y_ref, p_ref, x_ref, c_ref)
+        _lu_solve(w_ref, x_ref, k_ref, 0)
 
-                return jax.lax.fori_loop(0, i, fwd_col, carry)
+        # Stage 2: u = y + a21*k1, k2 = S(F(u) + C21*k1/dt)
+        def s2_u(i, carry):
+            yi = y_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            k1i = k_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            u_ref.at[:, pl.ds(i, 1)][...] = (yi + _a21 * k1i)[:, None]
+            return carry
 
-            jax.lax.fori_loop(0, nv, fwd_row, jnp.int32(0))
+        jax.lax.fori_loop(0, nv, s2_u, jnp.int32(0))
+        _eval_F(u_ref, p_ref, x_ref, c_ref)
 
-            # Back substitution: x[i] = (z[i] - sum U[i,j]*x[j]) / U[i,i]
-            def bwd_row(i_rev, carry):
-                i = nv - 1 - i_rev
+        def s2_rhs(i, carry):
+            fi = x_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            k1i = k_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            x_ref.at[:, pl.ds(i, 1)][...] = (fi + _C21 * k1i * inv_dt)[:, None]
+            return carry
 
-                def bwd_col(j_off, carry):
-                    j = i + 1 + j_off
-                    xi = x_ref.at[:, pl.ds(i, 1)][...][:, 0]
-                    xj = x_ref.at[:, pl.ds(j, 1)][...][:, 0]
-                    uij = w_ref.at[:, pl.ds(i * nv + j, 1)][...][:, 0]
-                    x_ref.at[:, pl.ds(i, 1)][...] = (xi - uij * xj)[:, None]
-                    return carry
+        jax.lax.fori_loop(0, nv, s2_rhs, jnp.int32(0))
+        _lu_solve(w_ref, x_ref, k_ref, 1)
 
-                jax.lax.fori_loop(0, nv - 1 - i, bwd_col, carry)
-                xi = x_ref.at[:, pl.ds(i, 1)][...][:, 0]
-                uii = w_ref.at[:, pl.ds(i * nv + i, 1)][...][:, 0]
-                x_ref.at[:, pl.ds(i, 1)][...] = (xi / uii)[:, None]
-                return carry
+        # Stage 3
+        def s3_u(i, carry):
+            yi = y_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            k1i = k_ref.at[:, pl.ds(0 * nv + i, 1)][...][:, 0]
+            k2i = k_ref.at[:, pl.ds(1 * nv + i, 1)][...][:, 0]
+            u_ref.at[:, pl.ds(i, 1)][...] = (yi + _a31 * k1i + _a32 * k2i)[:, None]
+            return carry
 
-            jax.lax.fori_loop(0, nv, bwd_row, jnp.int32(0))
+        jax.lax.fori_loop(0, nv, s3_u, jnp.int32(0))
+        _eval_F(u_ref, p_ref, x_ref, c_ref)
 
-            # Read result (static Python-int indexing)
-            return tuple(x_ref.at[:, i_s][...] for i_s in range(n_vars))
+        def s3_rhs(i, carry):
+            fi = x_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            k1i = k_ref.at[:, pl.ds(0 * nv + i, 1)][...][:, 0]
+            k2i = k_ref.at[:, pl.ds(1 * nv + i, 1)][...][:, 0]
+            x_ref.at[:, pl.ds(i, 1)][...] = (fi + (_C31 * k1i + _C32 * k2i) * inv_dt)[
+                :, None
+            ]
+            return carry
 
-        return _rodas5_stages(F, S, y, F0, inv_dt, n_vars)
+        jax.lax.fori_loop(0, nv, s3_rhs, jnp.int32(0))
+        _lu_solve(w_ref, x_ref, k_ref, 2)
 
-    return step
+        # Stage 4
+        def s4_u(i, carry):
+            yi = y_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            k1i = k_ref.at[:, pl.ds(0 * nv + i, 1)][...][:, 0]
+            k2i = k_ref.at[:, pl.ds(1 * nv + i, 1)][...][:, 0]
+            k3i = k_ref.at[:, pl.ds(2 * nv + i, 1)][...][:, 0]
+            u_ref.at[:, pl.ds(i, 1)][...] = (yi + _a41 * k1i + _a42 * k2i + _a43 * k3i)[
+                :, None
+            ]
+            return carry
 
+        jax.lax.fori_loop(0, nv, s4_u, jnp.int32(0))
+        _eval_F(u_ref, p_ref, x_ref, c_ref)
 
-# ---------------------------------------------------------------------------
-# Shared: Rodas5 8-stage computation (used by both step implementations)
-# ---------------------------------------------------------------------------
+        def s4_rhs(i, carry):
+            fi = x_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            k1i = k_ref.at[:, pl.ds(0 * nv + i, 1)][...][:, 0]
+            k2i = k_ref.at[:, pl.ds(1 * nv + i, 1)][...][:, 0]
+            k3i = k_ref.at[:, pl.ds(2 * nv + i, 1)][...][:, 0]
+            x_ref.at[:, pl.ds(i, 1)][...] = (
+                fi + (_C41 * k1i + _C42 * k2i + _C43 * k3i) * inv_dt
+            )[:, None]
+            return carry
 
+        jax.lax.fori_loop(0, nv, s4_rhs, jnp.int32(0))
+        _lu_solve(w_ref, x_ref, k_ref, 3)
 
-def _rodas5_stages(F, S, y, F0, inv_dt, n_vars):
-    """Compute the 8 Rodas5 stages given ODE function F and linear solver S."""
-    k1 = S(F0)
+        # Stage 5
+        def s5_u(i, carry):
+            yi = y_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            k1i = k_ref.at[:, pl.ds(0 * nv + i, 1)][...][:, 0]
+            k2i = k_ref.at[:, pl.ds(1 * nv + i, 1)][...][:, 0]
+            k3i = k_ref.at[:, pl.ds(2 * nv + i, 1)][...][:, 0]
+            k4i = k_ref.at[:, pl.ds(3 * nv + i, 1)][...][:, 0]
+            u_ref.at[:, pl.ds(i, 1)][...] = (
+                yi + _a51 * k1i + _a52 * k2i + _a53 * k3i + _a54 * k4i
+            )[:, None]
+            return carry
 
-    u = jax.tree.map(lambda yi, k1i: yi + _a21 * k1i, y, k1)
-    Fu = F(u)
-    k2 = S(jax.tree.map(lambda fui, k1i: fui + _C21 * k1i * inv_dt, Fu, k1))
+        jax.lax.fori_loop(0, nv, s5_u, jnp.int32(0))
+        _eval_F(u_ref, p_ref, x_ref, c_ref)
 
-    u = jax.tree.map(
-        lambda yi, k1i, k2i: yi + _a31 * k1i + _a32 * k2i,
-        y,
-        k1,
-        k2,
-    )
-    Fu = F(u)
-    k3 = S(
-        jax.tree.map(
-            lambda fui, k1i, k2i: fui + (_C31 * k1i + _C32 * k2i) * inv_dt,
-            Fu,
-            k1,
-            k2,
-        )
-    )
+        def s5_rhs(i, carry):
+            fi = x_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            k1i = k_ref.at[:, pl.ds(0 * nv + i, 1)][...][:, 0]
+            k2i = k_ref.at[:, pl.ds(1 * nv + i, 1)][...][:, 0]
+            k3i = k_ref.at[:, pl.ds(2 * nv + i, 1)][...][:, 0]
+            k4i = k_ref.at[:, pl.ds(3 * nv + i, 1)][...][:, 0]
+            x_ref.at[:, pl.ds(i, 1)][...] = (
+                fi + (_C51 * k1i + _C52 * k2i + _C53 * k3i + _C54 * k4i) * inv_dt
+            )[:, None]
+            return carry
 
-    u = jax.tree.map(
-        lambda yi, k1i, k2i, k3i: yi + _a41 * k1i + _a42 * k2i + _a43 * k3i,
-        y,
-        k1,
-        k2,
-        k3,
-    )
-    Fu = F(u)
-    k4 = S(
-        jax.tree.map(
-            lambda fui, k1i, k2i, k3i: (
-                fui + (_C41 * k1i + _C42 * k2i + _C43 * k3i) * inv_dt
-            ),
-            Fu,
-            k1,
-            k2,
-            k3,
-        )
-    )
+        jax.lax.fori_loop(0, nv, s5_rhs, jnp.int32(0))
+        _lu_solve(w_ref, x_ref, k_ref, 4)
 
-    u = jax.tree.map(
-        lambda yi, k1i, k2i, k3i, k4i: (
-            yi + _a51 * k1i + _a52 * k2i + _a53 * k3i + _a54 * k4i
-        ),
-        y,
-        k1,
-        k2,
-        k3,
-        k4,
-    )
-    Fu = F(u)
-    k5 = S(
-        jax.tree.map(
-            lambda fui, k1i, k2i, k3i, k4i: (
-                fui + (_C51 * k1i + _C52 * k2i + _C53 * k3i + _C54 * k4i) * inv_dt
-            ),
-            Fu,
-            k1,
-            k2,
-            k3,
-            k4,
-        )
-    )
+        # Stage 6
+        def s6_u(i, carry):
+            yi = y_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            k1i = k_ref.at[:, pl.ds(0 * nv + i, 1)][...][:, 0]
+            k2i = k_ref.at[:, pl.ds(1 * nv + i, 1)][...][:, 0]
+            k3i = k_ref.at[:, pl.ds(2 * nv + i, 1)][...][:, 0]
+            k4i = k_ref.at[:, pl.ds(3 * nv + i, 1)][...][:, 0]
+            k5i = k_ref.at[:, pl.ds(4 * nv + i, 1)][...][:, 0]
+            u_ref.at[:, pl.ds(i, 1)][...] = (
+                yi + _a61 * k1i + _a62 * k2i + _a63 * k3i + _a64 * k4i + _a65 * k5i
+            )[:, None]
+            return carry
 
-    u = jax.tree.map(
-        lambda yi, k1i, k2i, k3i, k4i, k5i: (
-            yi + _a61 * k1i + _a62 * k2i + _a63 * k3i + _a64 * k4i + _a65 * k5i
-        ),
-        y,
-        k1,
-        k2,
-        k3,
-        k4,
-        k5,
-    )
-    Fu = F(u)
-    k6 = S(
-        jax.tree.map(
-            lambda fui, k1i, k2i, k3i, k4i, k5i: (
-                fui
+        jax.lax.fori_loop(0, nv, s6_u, jnp.int32(0))
+        _eval_F(u_ref, p_ref, x_ref, c_ref)
+
+        def s6_rhs(i, carry):
+            fi = x_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            k1i = k_ref.at[:, pl.ds(0 * nv + i, 1)][...][:, 0]
+            k2i = k_ref.at[:, pl.ds(1 * nv + i, 1)][...][:, 0]
+            k3i = k_ref.at[:, pl.ds(2 * nv + i, 1)][...][:, 0]
+            k4i = k_ref.at[:, pl.ds(3 * nv + i, 1)][...][:, 0]
+            k5i = k_ref.at[:, pl.ds(4 * nv + i, 1)][...][:, 0]
+            x_ref.at[:, pl.ds(i, 1)][...] = (
+                fi
                 + (_C61 * k1i + _C62 * k2i + _C63 * k3i + _C64 * k4i + _C65 * k5i)
                 * inv_dt
-            ),
-            Fu,
-            k1,
-            k2,
-            k3,
-            k4,
-            k5,
-        )
-    )
+            )[:, None]
+            return carry
 
-    u = jax.tree.map(lambda ui, k6i: ui + k6i, u, k6)
-    Fu = F(u)
-    k7 = S(
-        jax.tree.map(
-            lambda fui, k1i, k2i, k3i, k4i, k5i, k6i: (
-                fui
+        jax.lax.fori_loop(0, nv, s6_rhs, jnp.int32(0))
+        _lu_solve(w_ref, x_ref, k_ref, 5)
+
+        # Stage 7: u = u_stage6 + k6
+        def s7_u(i, carry):
+            ui = u_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            k6i = k_ref.at[:, pl.ds(5 * nv + i, 1)][...][:, 0]
+            u_ref.at[:, pl.ds(i, 1)][...] = (ui + k6i)[:, None]
+            return carry
+
+        jax.lax.fori_loop(0, nv, s7_u, jnp.int32(0))
+        _eval_F(u_ref, p_ref, x_ref, c_ref)
+
+        def s7_rhs(i, carry):
+            fi = x_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            k1i = k_ref.at[:, pl.ds(0 * nv + i, 1)][...][:, 0]
+            k2i = k_ref.at[:, pl.ds(1 * nv + i, 1)][...][:, 0]
+            k3i = k_ref.at[:, pl.ds(2 * nv + i, 1)][...][:, 0]
+            k4i = k_ref.at[:, pl.ds(3 * nv + i, 1)][...][:, 0]
+            k5i = k_ref.at[:, pl.ds(4 * nv + i, 1)][...][:, 0]
+            k6i = k_ref.at[:, pl.ds(5 * nv + i, 1)][...][:, 0]
+            x_ref.at[:, pl.ds(i, 1)][...] = (
+                fi
                 + (
                     _C71 * k1i
                     + _C72 * k2i
@@ -280,23 +353,33 @@ def _rodas5_stages(F, S, y, F0, inv_dt, n_vars):
                     + _C76 * k6i
                 )
                 * inv_dt
-            ),
-            Fu,
-            k1,
-            k2,
-            k3,
-            k4,
-            k5,
-            k6,
-        )
-    )
+            )[:, None]
+            return carry
 
-    u = jax.tree.map(lambda ui, k7i: ui + k7i, u, k7)
-    Fu = F(u)
-    k8 = S(
-        jax.tree.map(
-            lambda fui, k1i, k2i, k3i, k4i, k5i, k6i, k7i: (
-                fui
+        jax.lax.fori_loop(0, nv, s7_rhs, jnp.int32(0))
+        _lu_solve(w_ref, x_ref, k_ref, 6)
+
+        # Stage 8: u = u_stage7 + k7
+        def s8_u(i, carry):
+            ui = u_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            k7i = k_ref.at[:, pl.ds(6 * nv + i, 1)][...][:, 0]
+            u_ref.at[:, pl.ds(i, 1)][...] = (ui + k7i)[:, None]
+            return carry
+
+        jax.lax.fori_loop(0, nv, s8_u, jnp.int32(0))
+        _eval_F(u_ref, p_ref, x_ref, c_ref)
+
+        def s8_rhs(i, carry):
+            fi = x_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            k1i = k_ref.at[:, pl.ds(0 * nv + i, 1)][...][:, 0]
+            k2i = k_ref.at[:, pl.ds(1 * nv + i, 1)][...][:, 0]
+            k3i = k_ref.at[:, pl.ds(2 * nv + i, 1)][...][:, 0]
+            k4i = k_ref.at[:, pl.ds(3 * nv + i, 1)][...][:, 0]
+            k5i = k_ref.at[:, pl.ds(4 * nv + i, 1)][...][:, 0]
+            k6i = k_ref.at[:, pl.ds(5 * nv + i, 1)][...][:, 0]
+            k7i = k_ref.at[:, pl.ds(6 * nv + i, 1)][...][:, 0]
+            x_ref.at[:, pl.ds(i, 1)][...] = (
+                fi
                 + (
                     _C81 * k1i
                     + _C82 * k2i
@@ -307,20 +390,23 @@ def _rodas5_stages(F, S, y, F0, inv_dt, n_vars):
                     + _C87 * k7i
                 )
                 * inv_dt
-            ),
-            Fu,
-            k1,
-            k2,
-            k3,
-            k4,
-            k5,
-            k6,
-            k7,
-        )
-    )
+            )[:, None]
+            return carry
 
-    y_new = jax.tree.map(lambda ui, k8i: ui + k8i, u, k8)
-    return y_new, k8
+        jax.lax.fori_loop(0, nv, s8_rhs, jnp.int32(0))
+        _lu_solve(w_ref, x_ref, k_ref, 7)
+
+        # y_new = u + k8  ->  u_ref
+        def ynew(i, carry):
+            ui = u_ref.at[:, pl.ds(i, 1)][...][:, 0]
+            k8i = k_ref.at[:, pl.ds(7 * nv + i, 1)][...][:, 0]
+            u_ref.at[:, pl.ds(i, 1)][...] = (ui + k8i)[:, None]
+            return carry
+
+        jax.lax.fori_loop(0, nv, ynew, jnp.int32(0))
+        # After: u_ref = y_new, k_ref[7*nv:] = k8 (error estimate)
+
+    return step
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +414,7 @@ def _rodas5_stages(F, S, y, F0, inv_dt, n_vars):
 # ---------------------------------------------------------------------------
 
 
-def make_solver(ode_fn):
+def make_solver(ode_fn, *, ode_ref_fn=None, constants=None):
     """Create a Pallas ensemble solver for the given ODE using Rodas5.
 
     Args:
@@ -337,7 +423,18 @@ def make_solver(ode_fn):
             where y and p are tuples of scalar-like values and the return
             is a tuple of the same length as y. The function must use only
             element-wise operations so it can run inside a Pallas/Triton
-            kernel.
+            kernel.  Always required (used for Jacobian computation via JVP).
+
+        ode_ref_fn: Optional Ref-based ODE function with signature
+            (y_ref, p_ref, dy_ref, c_ref) -> None
+            that reads state from y_ref, parameters from p_ref, and writes
+            derivatives to dy_ref.  c_ref provides the constants array.
+            Can use fori_loop for compact Triton IR in large systems.
+            If None, ode_fn is wrapped with Ref reads/writes instead.
+
+        constants: Optional 1-D array of constants passed to ode_ref_fn
+            via c_ref.  Broadcast to every block so that each trajectory
+            sees the same constant values.
 
     Returns:
         solve_ensemble_pallas function.
@@ -363,6 +460,8 @@ def make_solver(ode_fn):
             "y_cols",
             "w_cols",
             "x_cols",
+            "k_cols",
+            "c_cols",
             "n_vars",
             "n_params",
             "tf",
@@ -375,12 +474,15 @@ def make_solver(ode_fn):
     def _rodas5_pallas_solve(
         params_arr,
         y0_arr,
+        c_arr,
         *,
         n_pad,
         p_cols,
         y_cols,
         w_cols,
         x_cols,
+        k_cols,
+        c_cols,
         n_vars,
         n_params,
         tf,
@@ -389,54 +491,64 @@ def make_solver(ode_fn):
         a_tol,
         ms,
     ):
-        step_fn = _make_rodas5_step(ode_fn, n_vars)
+        step_fn = _make_rodas5_step(ode_fn, ode_ref_fn, n_vars, n_params)
+        nv = n_vars
 
-        def kernel_body(params_ref, y0_ref, y_ref, w_ref, x_ref):
-            p = tuple(params_ref.at[:, i][...] for i in range(n_params))
-            y = tuple(y0_ref.at[:, i][...] for i in range(n_vars))
+        def kernel_body(params_ref, y0_ref, c_ref, y_ref, w_ref, x_ref, k_ref, u_ref):
+            # Copy initial conditions to working state
+            for i in range(n_vars):
+                y_ref.at[:, i][...] = y0_ref.at[:, i][...]
 
-            z = p[0] * 0.0
+            z = params_ref.at[:, 0][...] * 0.0
             t = z + 0.0
             dt_v = z + dt0
 
             def cond_fn(state):
-                return (jnp.min(state[0]) < tf) & (state[-1] < ms)
+                t, _dt_v, n = state
+                return (jnp.min(t) < tf) & (n < ms)
 
             def body_fn(state):
-                t = state[0]
-                y = state[1 : 1 + n_vars]
-                dt_v = state[1 + n_vars]
-                n = state[2 + n_vars]
+                t, dt_v, n = state
 
                 active = t < tf
                 dt_use = jnp.maximum(jnp.minimum(dt_v, tf - t), 1e-30)
 
-                u, err = step_fn(y, p, dt_use, w_ref, x_ref)
+                # Rodas5 step: y_ref -> u_ref (y_new), k_ref[7*nv:] (k8 err)
+                step_fn(
+                    params_ref,
+                    dt_use,
+                    w_ref,
+                    x_ref,
+                    y_ref,
+                    k_ref,
+                    u_ref,
+                    c_ref,
+                )
 
-                sc = jax.tree.map(
-                    lambda yi, ui: (
-                        a_tol + r_tol * jnp.maximum(jnp.abs(yi), jnp.abs(ui))
-                    ),
-                    y,
-                    u,
-                )
-                err_terms = jax.tree.map(
-                    lambda eri, sci: (eri / sci) ** 2,
-                    err,
-                    sc,
-                )
-                err_sq = jax.tree_util.tree_reduce(
-                    lambda acc, x: acc + x,
-                    err_terms,
-                    initializer=jnp.zeros_like(t),
-                )
-                EEst = jnp.sqrt(err_sq / n_vars)
+                # Error estimation via fori_loop
+                def compute_err_sq(i, acc):
+                    yi = y_ref.at[:, pl.ds(i, 1)][...][:, 0]
+                    ui = u_ref.at[:, pl.ds(i, 1)][...][:, 0]
+                    k8i = k_ref.at[:, pl.ds(7 * nv + i, 1)][...][:, 0]
+                    sc = a_tol + r_tol * jnp.maximum(jnp.abs(yi), jnp.abs(ui))
+                    return acc + (k8i / sc) ** 2
+
+                err_sq = jax.lax.fori_loop(0, nv, compute_err_sq, jnp.zeros_like(t))
+                EEst = jnp.sqrt(err_sq / nv)
 
                 accept = (EEst <= 1.0) & ~jnp.isnan(EEst)
                 mask = active & accept
 
                 t_new = jnp.where(mask, t + dt_use, t)
-                y_new = jax.tree.map(lambda ui, yi: jnp.where(mask, ui, yi), u, y)
+
+                # Accept/reject: update y_ref from u_ref where accepted
+                def update_y(i, carry):
+                    yi = y_ref.at[:, pl.ds(i, 1)][...][:, 0]
+                    ui = u_ref.at[:, pl.ds(i, 1)][...][:, 0]
+                    y_ref.at[:, pl.ds(i, 1)][...] = jnp.where(mask, ui, yi)[:, None]
+                    return carry
+
+                jax.lax.fori_loop(0, nv, update_y, jnp.int32(0))
 
                 safe_EEst = jnp.where(
                     jnp.isnan(EEst) | (EEst > 1e18),
@@ -446,31 +558,31 @@ def make_solver(ode_fn):
                 factor = jnp.clip(0.9 * safe_EEst ** (-1.0 / 6.0), 0.2, 6.0)
                 new_dt = jnp.where(active, dt_use * factor, dt_v)
 
-                return (t_new,) + y_new + (new_dt, n + 1)
+                return (t_new, new_dt, n + 1)
 
-            init = (t,) + y + (dt_v, jnp.int32(0))
-            final = jax.lax.while_loop(cond_fn, body_fn, init)
-
-            result = final[1 : 1 + n_vars]
-            for i in range(n_vars):
-                y_ref.at[:, i][...] = result[i]
+            jax.lax.while_loop(cond_fn, body_fn, (t, dt_v, jnp.int32(0)))
+            # y_ref already holds the final result
 
         p_bs = pl.BlockSpec((_BLOCK, p_cols), lambda i: (i, 0))
         y_bs = pl.BlockSpec((_BLOCK, y_cols), lambda i: (i, 0))
         w_bs = pl.BlockSpec((_BLOCK, w_cols), lambda i: (i, 0))
         x_bs = pl.BlockSpec((_BLOCK, x_cols), lambda i: (i, 0))
+        k_bs = pl.BlockSpec((_BLOCK, k_cols), lambda i: (i, 0))
+        c_bs = pl.BlockSpec((_BLOCK, c_cols), lambda i: (i, 0))
         results = pl.pallas_call(
             kernel_body,
             out_shape=[
                 jax.ShapeDtypeStruct((n_pad, y_cols), jnp.float64),
                 jax.ShapeDtypeStruct((n_pad, w_cols), jnp.float64),
                 jax.ShapeDtypeStruct((n_pad, x_cols), jnp.float64),
+                jax.ShapeDtypeStruct((n_pad, k_cols), jnp.float64),
+                jax.ShapeDtypeStruct((n_pad, x_cols), jnp.float64),
             ],
             grid=(n_pad // _BLOCK,),
-            in_specs=(p_bs, y_bs),
-            out_specs=(y_bs, w_bs, x_bs),
+            in_specs=(p_bs, y_bs, c_bs),
+            out_specs=(y_bs, w_bs, x_bs, k_bs, x_bs),
             compiler_params=pltriton.CompilerParams(num_warps=1, num_stages=2),
-        )(params_arr, y0_arr)
+        )(params_arr, y0_arr, c_arr)
         return results[0]
 
     def solve_ensemble_pallas(
@@ -514,6 +626,20 @@ def make_solver(ode_fn):
         y_cols = _pad_cols_pow2(n_vars)
         w_cols = _pad_cols_pow2(n_vars * n_vars)
         x_cols = _pad_cols_pow2(n_vars)
+        k_cols = _pad_cols_pow2(8 * n_vars)
+
+        # Constants array (broadcast to every row)
+        if constants is not None:
+            n_const = len(constants)
+            c_cols = _pad_cols_pow2(n_const)
+            c_1d = jnp.pad(
+                jnp.asarray(constants, dtype=jnp.float64),
+                (0, c_cols - n_const),
+            )
+            c_arr = jnp.tile(c_1d[None, :], (N_pad, 1))
+        else:
+            c_cols = 1
+            c_arr = jnp.zeros((N_pad, 1), dtype=jnp.float64)
 
         params_arr = jnp.pad(params_batch, ((0, N_pad - N), (0, p_cols - n_params)))
         y0_arr = jnp.pad(y0_batch, ((0, N_pad - N), (0, y_cols - n_vars)))
@@ -521,11 +647,14 @@ def make_solver(ode_fn):
         y_out = _rodas5_pallas_solve(
             params_arr,
             y0_arr,
+            c_arr,
             n_pad=N_pad,
             p_cols=p_cols,
             y_cols=y_cols,
             w_cols=w_cols,
             x_cols=x_cols,
+            k_cols=k_cols,
+            c_cols=c_cols,
             n_vars=n_vars,
             n_params=n_params,
             tf=tf,
