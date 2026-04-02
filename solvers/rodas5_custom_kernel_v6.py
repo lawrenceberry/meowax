@@ -496,6 +496,13 @@ def make_solver(jac_fn):
             ],
             grid=(n_pad // _BLOCK,),
             in_specs=(y_bs,),
+            # Output refs match kernel_body(y0_ref, y_ref, w_ref, x_ref, k_ref, u_ref, m_ref):
+            # y_bs -> accepted state y
+            # w_bs -> LU workspace for W = I/(dt*gamma) - M(t)
+            # x_bs -> stage RHS / solve workspace x
+            # k_bs -> stacked Rodas5 stage increments k1..k8
+            # x_bs -> temporary stage state u
+            # m_bs -> per-trajectory flattened Jacobian M(t)
             out_specs=(y_bs, w_bs, x_bs, k_bs, x_bs, m_bs),
             compiler_params=pltriton.CompilerParams(num_warps=1, num_stages=2),
         )(y0_arr)
