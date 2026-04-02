@@ -12,6 +12,7 @@ import pytest
 from solvers.rodas5 import solve_ensemble as rodas5_solve_ensemble
 from solvers.rodas5_custom_kernel_v2 import make_solver as make_rodas5_v2_solver
 from solvers.rodas5_custom_kernel_v3 import make_solver as make_rodas5_v3_solver
+from solvers.rodas5_custom_kernel_v4 import make_solver as make_rodas5_v4_solver
 
 _N_VARS = 30
 _T_SPAN = (0.0, 1.0)
@@ -317,6 +318,108 @@ def test_rodas5_v2_30d_pallas_compile_time(benchmark):
 
         t1 = time.perf_counter()
         y_second = solve_v2(**kwargs).block_until_ready()
+        second_call_s = time.perf_counter() - t1
+
+        assert y_first.shape == (N, _N_VARS)
+        assert y_second.shape == (N, _N_VARS)
+        np.testing.assert_allclose(y_first.sum(axis=1), 1.0, atol=3e-6)
+        return max(first_call_s - second_call_s, 0.0)
+
+    compile_estimate_s = benchmark.pedantic(
+        measure_compile_estimate,
+        warmup_rounds=0,
+        rounds=1,
+        iterations=1,
+    )
+    benchmark.extra_info["compile_estimate_s"] = float(compile_estimate_s)
+    assert compile_estimate_s >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# v4 Numba CUDA tests
+# ---------------------------------------------------------------------------
+
+
+def test_rodas5_v4_30d_matches_rodas5_reference_for_linear_matrix():
+    """Validate Numba CUDA v4 solver on the 30D stiff chain."""
+    N = 256
+
+    y0 = np.array([1.0] + [0.0] * (_N_VARS - 1), dtype=np.float64)
+    y0_batch = np.broadcast_to(y0, (N, _N_VARS)).copy()
+
+    solve_v4 = make_rodas5_v4_solver(np.asarray(_M_30D))
+    y_v4 = solve_v4(
+        y0_batch=y0_batch,
+        t_span=_T_SPAN,
+        first_step=1e-6,
+        rtol=1e-6,
+        atol=1e-8,
+    )
+
+    params_batch = jnp.ones((N, 1), dtype=jnp.float64)
+    y_ref = rodas5_solve_ensemble(
+        _stiff_30d_array,
+        y0=jnp.array(y0),
+        t_span=_T_SPAN,
+        params_batch=params_batch,
+        first_step=1e-6,
+        rtol=1e-6,
+        atol=1e-8,
+    ).block_until_ready()
+
+    assert y_v4.shape == (N, _N_VARS)
+    np.testing.assert_allclose(y_v4.sum(axis=1), 1.0, atol=3e-6)
+    np.testing.assert_allclose(y_v4, np.asarray(y_ref), rtol=3e-5, atol=3e-8)
+
+
+@pytest.mark.parametrize("y0_batch_30d", [2, 100, 1000, 10000, 100_000], indirect=True)
+def test_rodas5_v4_30d_numba_ensemble_N(benchmark, y0_batch_30d):
+    """Rodas5 v4 Numba CUDA ensemble benchmark on the stiff 30D system."""
+    solve_v4 = make_rodas5_v4_solver(np.asarray(_M_30D))
+    y0_np = np.asarray(y0_batch_30d, dtype=np.float64).copy()
+    results = benchmark.pedantic(
+        lambda: solve_v4(
+            y0_batch=y0_np,
+            t_span=_T_SPAN,
+            first_step=1e-6,
+            rtol=1e-6,
+            atol=1e-8,
+        ),
+        warmup_rounds=1,
+        rounds=1,
+    )
+
+    assert results.shape == (y0_np.shape[0], _N_VARS)
+    np.testing.assert_allclose(results.sum(axis=1), 1.0, atol=3e-6)
+
+
+def test_rodas5_v4_30d_numba_compile_time(benchmark):
+    """Measure approximate compile time for v4 Numba CUDA solver.
+
+    Uses first-call latency minus steady-state latency as estimate.
+    """
+    N = 1234
+
+    solve_v4 = make_rodas5_v4_solver(np.asarray(_M_30D))
+    y0 = np.array([1.0] + [0.0] * (_N_VARS - 1), dtype=np.float64)
+    y0_batch = np.broadcast_to(y0, (N, _N_VARS)).copy()
+
+    kwargs = dict(
+        y0_batch=y0_batch,
+        t_span=_T_SPAN,
+        first_step=7e-7,
+        rtol=1.23e-6,
+        atol=4.56e-8,
+        max_steps=654321,
+    )
+
+    def measure_compile_estimate():
+        t0 = time.perf_counter()
+        y_first = solve_v4(**kwargs)
+        first_call_s = time.perf_counter() - t0
+
+        t1 = time.perf_counter()
+        y_second = solve_v4(**kwargs)
         second_call_s = time.perf_counter() - t1
 
         assert y_first.shape == (N, _N_VARS)
