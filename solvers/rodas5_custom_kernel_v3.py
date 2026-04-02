@@ -105,13 +105,16 @@ def _make_rodas5_step(n_vars):
         inv_dt = 1.0 / dt
         d = 1.0 / dtgamma
 
-        for i_s in range(nv):
-            for j_s in range(nv):
+        def build_w_row(i_s, carry):
+            def build_w_col(j_s, carry):
                 mij = m_ref.at[pl.ds(i_s, 1), pl.ds(j_s, 1)][...][0, 0]
-                val = jnp.full_like(d, -mij)
-                if i_s == j_s:
-                    val = val + d
+                val = -mij + jnp.where(i_s == j_s, d, 0.0)
                 w_ref.at[:, pl.ds(i_s * nv + j_s, 1)][...] = val[:, None]
+                return carry
+
+            return jax.lax.fori_loop(0, nv, build_w_col, carry)
+
+        jax.lax.fori_loop(0, nv, build_w_row, jnp.int32(0))
 
         def lu_col(j, carry):
             pivot = w_ref.at[:, pl.ds(j * nv + j, 1)][...][:, 0]
