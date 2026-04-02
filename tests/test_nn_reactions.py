@@ -583,13 +583,15 @@ def test_rodas5_v6_matches_closed_form_time_dependent_reference(nn_reaction_syst
         rtol=1e-6,
         atol=1e-8,
     ).block_until_ready()
+    y_v6_np = np.asarray(y_v6)
 
     y_exact = system["time_exact"](system["y0"], _T_SPAN)
     y_exact_batch = _broadcast_y0(y_exact, N)
+    y_exact_np = np.asarray(y_exact_batch)
 
     assert y_v6.shape == (N, system["n_vars"])
-    np.testing.assert_allclose(y_v6.sum(axis=1), 1.0, atol=3e-6)
-    np.testing.assert_allclose(y_v6, y_exact_batch, rtol=2e-4, atol=3e-8)
+    np.testing.assert_allclose(y_v6_np.sum(axis=1), 1.0, atol=3e-6)
+    np.testing.assert_allclose(y_v6_np, y_exact_np, rtol=2e-4, atol=3e-8)
 
 
 @pytest.mark.parametrize("nn_reaction_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id)
@@ -612,7 +614,7 @@ def test_rodas5_v6_pallas_ensemble_N(benchmark, nn_reaction_system, ensemble_siz
     )
 
     assert results.shape == (ensemble_size, system["n_vars"])
-    np.testing.assert_allclose(results.sum(axis=1), 1.0, atol=3e-6)
+    np.testing.assert_allclose(np.asarray(results).sum(axis=1), 1.0, atol=3e-6)
 
 
 @pytest.mark.parametrize("nn_reaction_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id)
@@ -644,7 +646,7 @@ def test_rodas5_v6_pallas_compile_time(benchmark, nn_reaction_system):
 
         assert y_first.shape == (N, system["n_vars"])
         assert y_second.shape == (N, system["n_vars"])
-        np.testing.assert_allclose(y_first.sum(axis=1), 1.0, atol=3e-6)
+        np.testing.assert_allclose(np.asarray(y_first).sum(axis=1), 1.0, atol=3e-6)
         return max(first_call_s - second_call_s, 0.0)
 
     compile_estimate_s = benchmark.pedantic(

@@ -2,8 +2,8 @@
 
 This variant solves linear systems of the form dy/dt = M(t) y, where the
 Jacobian callback returns the dense state matrix for the current step time.
-Each step refreshes ``m_ref`` once, then reuses the existing matrix-specialized
-stage code unchanged.
+Each trajectory carries its own time value, so the Jacobian is evaluated
+per-trajectory and stored into ``m_ref`` in flattened row-major form.
 """
 
 import functools
@@ -58,7 +58,7 @@ def _make_rodas5_step(jac_fn, n_vars):
 
             def col(j, acc):
                 yj = src_ref.at[:, pl.ds(j, 1)][...][:, 0]
-                mij = m_ref.at[pl.ds(i, 1), pl.ds(j, 1)][...][0, 0]
+                mij = m_ref.at[:, pl.ds(i * nv + j, 1)][...][:, 0]
                 return acc + mij * yj
 
             acc = jax.lax.fori_loop(0, nv, col, acc)
@@ -119,7 +119,7 @@ def _make_rodas5_step(jac_fn, n_vars):
 
             def store_m_col(j_s, carry):
                 mij = _tuple_select(row_i, j_s)
-                m_ref.at[pl.ds(i_s, 1), pl.ds(j_s, 1)][...] = mij[None, None]
+                m_ref.at[:, pl.ds(i_s * nv + j_s, 1)][...] = mij[:, None]
                 return carry
 
             return jax.lax.fori_loop(0, nv, store_m_col, carry)
@@ -128,7 +128,7 @@ def _make_rodas5_step(jac_fn, n_vars):
 
         def build_w_row(i_s, carry):
             def build_w_col(j_s, carry):
-                mij = m_ref.at[pl.ds(i_s, 1), pl.ds(j_s, 1)][...][0, 0]
+                mij = m_ref.at[:, pl.ds(i_s * nv + j_s, 1)][...][:, 0]
                 val = -mij + jnp.where(i_s == j_s, d, 0.0)
                 w_ref.at[:, pl.ds(i_s * nv + j_s, 1)][...] = val[:, None]
                 return carry
@@ -374,7 +374,9 @@ def make_solver(jac_fn):
     """
     M0 = jnp.asarray(jac_fn(jnp.float64(0.0)), dtype=jnp.float64)
     if M0.ndim != 2 or M0.shape[0] != M0.shape[1]:
-        raise ValueError(f"jac_fn(0.0) must be square with shape (n, n), got {M0.shape}")
+        raise ValueError(
+            f"jac_fn(0.0) must be square with shape (n, n), got {M0.shape}"
+        )
 
     n_vars = int(M0.shape[0])
 
@@ -428,7 +430,7 @@ def make_solver(jac_fn):
 
                 active = t < tf
                 dt_use = jnp.maximum(jnp.minimum(dt_v, tf - t), 1e-30)
-                t_use = jnp.min(jnp.where(active, t, tf))
+                t_use = jnp.where(active, t, tf)
 
                 step_fn(
                     t_use,
@@ -480,8 +482,8 @@ def make_solver(jac_fn):
         w_bs = pl.BlockSpec((_BLOCK, w_cols), lambda i: (i, 0))
         x_bs = pl.BlockSpec((_BLOCK, x_cols), lambda i: (i, 0))
         k_bs = pl.BlockSpec((_BLOCK, k_cols), lambda i: (i, 0))
-        m_rows = (n_pad // _BLOCK) * n_vars
-        m_bs = pl.BlockSpec((n_vars, n_vars), lambda i: (i * n_vars, 0))
+        m_cols = _pad_cols_pow2(n_vars * n_vars)
+        m_bs = pl.BlockSpec((_BLOCK, m_cols), lambda i: (i, 0))
         results = pl.pallas_call(
             kernel_body,
             out_shape=[
@@ -490,7 +492,7 @@ def make_solver(jac_fn):
                 jax.ShapeDtypeStruct((n_pad, x_cols), jnp.float64),
                 jax.ShapeDtypeStruct((n_pad, k_cols), jnp.float64),
                 jax.ShapeDtypeStruct((n_pad, x_cols), jnp.float64),
-                jax.ShapeDtypeStruct((m_rows, n_vars), jnp.float64),
+                jax.ShapeDtypeStruct((n_pad, m_cols), jnp.float64),
             ],
             grid=(n_pad // _BLOCK,),
             in_specs=(y_bs,),
@@ -520,9 +522,7 @@ def make_solver(jac_fn):
 
         tf = float(t_span[1])
         t0 = float(t_span[0])
-        dt0 = float(
-            first_step if first_step is not None else (tf - t0) * 1e-6
-        )
+        dt0 = float(first_step if first_step is not None else (tf - t0) * 1e-6)
 
         y_cols = _pad_cols_pow2(n_vars)
         w_cols = _pad_cols_pow2(n_vars * n_vars)
