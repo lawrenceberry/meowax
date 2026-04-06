@@ -17,6 +17,7 @@ from solvers.rodas5_custom_kernel_v4 import make_solver as make_rodas5_v4_solver
 from solvers.rodas5_custom_kernel_v5 import make_solver as make_rodas5_v5_solver
 from solvers.rodas5_custom_kernel_v6 import make_solver as make_rodas5_v6_solver
 from solvers.rodas5_custom_kernel_v7_tc import make_solver as make_rodas5_v7_tc_solver
+from solvers.rodas5_v2 import solve_ensemble as rodas5_v2_solve_ensemble
 
 _T_SPAN = (0.0, 1.0)
 _V6_SAVE_TIMES = jnp.array(_T_SPAN, dtype=jnp.float64)
@@ -861,3 +862,66 @@ def test_rodas5_v7_tc_compile_time(benchmark, nn_reaction_system):
     )
     benchmark.extra_info["compile_estimate_s"] = float(compile_estimate_s)
     assert compile_estimate_s >= 0.0
+
+
+# ---------------------------------------------------------------------------
+# Rodas5 v2 — single-loop batched ensemble
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("nn_reaction_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id)
+@pytest.mark.parametrize("batch_size", [1, 7, None], ids=["bs1", "bs7", "bsN"])
+def test_rodas5_v2_matches_reference(nn_reaction_system, batch_size):
+    """Validate single-loop v2 solver against vmap reference."""
+    N = 100
+    system = nn_reaction_system
+    params_batch = _make_params_batch(N, seed=0)
+
+    y_v2 = rodas5_v2_solve_ensemble(
+        system["array"],
+        y0=system["y0"],
+        t_span=_T_SPAN,
+        params_batch=params_batch,
+        first_step=1e-6,
+        rtol=1e-6,
+        atol=1e-8,
+        batch_size=batch_size,
+    ).block_until_ready()
+
+    y_ref = rodas5_solve_ensemble(
+        system["array"],
+        y0=system["y0"],
+        t_span=_T_SPAN,
+        params_batch=params_batch,
+        first_step=1e-6,
+        rtol=1e-6,
+        atol=1e-8,
+    ).block_until_ready()
+
+    assert y_v2.shape == (N, system["n_vars"])
+    np.testing.assert_allclose(y_v2.sum(axis=1), 1.0, atol=3e-6)
+    np.testing.assert_allclose(y_v2, y_ref, rtol=1e-6, atol=1e-9)
+
+
+@pytest.mark.parametrize("nn_reaction_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id)
+@pytest.mark.parametrize("ensemble_size", _ENSEMBLE_SIZES)
+def test_rodas5_v2_ensemble_N(benchmark, nn_reaction_system, ensemble_size):
+    """Rodas5 v2 single-loop ensemble benchmark on the reaction system."""
+    system = nn_reaction_system
+    params_batch = _make_params_batch(ensemble_size, seed=42)
+    results = benchmark.pedantic(
+        lambda: rodas5_v2_solve_ensemble(
+            system["array"],
+            y0=system["y0"],
+            t_span=_T_SPAN,
+            params_batch=params_batch,
+            first_step=1e-6,
+            rtol=1e-6,
+            atol=1e-8,
+        ).block_until_ready(),
+        warmup_rounds=1,
+        rounds=1,
+    )
+
+    assert results.shape == (ensemble_size, system["n_vars"])
+    np.testing.assert_allclose(results.sum(axis=1), 1.0, atol=3e-6)
