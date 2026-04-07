@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(RODAS5_V2_ENABLE_CUDSS=1 uv run pytest tests/test_nn_reactions.py -k \"test_rodas5_v2_jac_sparse_fn_timing\" -v --benchmark-columns=mean,stddev)",
+      "Bash(dpkg -L nvidia-cuda-toolkit)",
+      "Read(//usr/local/cuda-12.8/bin/**)",
+      "Read(//usr/bin/**)"
+    ]
+  }
+}

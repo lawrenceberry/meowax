@@ -1,3 +1,10 @@
+[build-system]
+requires = [
+    "scikit-build-core>=0.12",
+    "nanobind>=2.12",
+]
+build-backend = "scikit_build_core.build"
+
 [project]
 name = "ode-test"
 version = "0.1.0"
@@ -18,6 +25,7 @@ dependencies = [
 [project.optional-dependencies]
 gpu = [
     "jax[cuda12]>=0.9.1",
+    "nvidia-cudss-cu12>=0.7.1.6",
 ]
 
 [dependency-groups]
@@ -40,3 +48,6 @@ extend-select = ["I"]
 typeCheckingMode = "recommended"
 venv = ".venv"
 venvPath = "."
+
+[tool.scikit-build]
+wheel.packages = ["solvers"]

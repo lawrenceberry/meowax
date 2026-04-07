@@ -113,6 +113,19 @@ wheels = [
 ]
 
 [[package]]
+name = "cuda-toolkit"
+version = "12.9.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7c/8f/a28e7da158e96ad61f7e1035e53851fafaddf22445300d664e68ec657fdc/cuda_toolkit-12.9.1-py2.py3-none-any.whl", hash = "sha256:0c8636dfacbecfe9867a949a211864f080a805bc54023ce4a361aa4e1fd8738b", size = 2303, upload-time = "2025-08-13T02:03:10.699Z" },
+]
+
+[package.optional-dependencies]
+cublas = [
+    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[package]]
 name = "cycler"
 version = "0.12.1"
 source = { registry = "https://pypi.org/simple" }
@@ -579,6 +592,7 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/82/6c/90d3f532f608a03a13c1d6c16c266ffa3828e8011b1549d3b61db2ad59f5/nvidia_cublas_cu12-12.9.1.4-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:7a950dae01add3b415a5a5cdc4ec818fb5858263e9cca59004bb99fdbbd3a5d6", size = 575006342, upload-time = "2025-06-05T20:04:16.902Z" },
     { url = "https://files.pythonhosted.org/packages/77/3c/aa88abe01f3be3d1f8f787d1d33dc83e76fec05945f9a28fbb41cfb99cd5/nvidia_cublas_cu12-12.9.1.4-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:453611eb21a7c1f2c2156ed9f3a45b691deda0440ec550860290dc901af5b4c2", size = 581242350, upload-time = "2025-06-05T20:04:51.979Z" },
+    { url = "https://files.pythonhosted.org/packages/45/a1/a17fade6567c57452cfc8f967a40d1035bb9301db52f27808167fbb2be2f/nvidia_cublas_cu12-12.9.1.4-py3-none-win_amd64.whl", hash = "sha256:1e5fee10662e6e52bd71dec533fbbd4971bb70a5f24f3bc3793e5c2e9dc640bf", size = 553153899, upload-time = "2025-06-05T20:13:35.556Z" },
 ]
 
 [[package]]
@@ -636,6 +650,19 @@ dependencies = [
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0c/77/1c382fdc5de163b2ff14d6174d12dc318c0a42302f5e3a4fbc5114ab0501/nvidia_cudnn_cu12-9.20.0.48-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:d9da9c15344323afae571751393552652c52486eab0b886530997bef664e29de", size = 664659972, upload-time = "2026-03-09T19:27:37.986Z" },
     { url = "https://files.pythonhosted.org/packages/3b/52/94aecda69df65ba1079a8b7dbe84632af5614dc0ed2c733185f6431874e3/nvidia_cudnn_cu12-9.20.0.48-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:7d7479e1321c7a039b33827f0247791ee1be091759032c1f66a287c4a643396a", size = 657910570, upload-time = "2026-03-09T19:28:58.944Z" },
+]
+
+[[package]]
+name = "nvidia-cudss-cu12"
+version = "0.7.1.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cuda-toolkit", extra = ["cublas"] },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4e/7f/0bb96031bdc421c5d2123c0570f7ba391e19c621862ceb20b2361a29ca94/nvidia_cudss_cu12-0.7.1.6-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:edf9a0d40463841a18e77e34071747ae7ae3145e0af65c976923a9ac125f97ac", size = 79845306, upload-time = "2025-11-04T21:45:12.625Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/3b/bc2da119af8328b7096bced5632d3b1045dad9b40cb2f3c64717c535e89f/nvidia_cudss_cu12-0.7.1.6-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:8b7837d216e871bb9ac174300a62eb998344f0b5faa03cf8f93d37c28985b325", size = 79958151, upload-time = "2025-11-04T21:46:46.009Z" },
+    { url = "https://files.pythonhosted.org/packages/4d/67/13a8eb884b6cb314fffd8b9e4c60bcb18c8141e1a6ec9b51a95c84c87bde/nvidia_cudss_cu12-0.7.1.6-py3-none-win_amd64.whl", hash = "sha256:6cbe6f0c404259243faecf2ca13dfe282655d6296b97d5188995166190728435", size = 70856822, upload-time = "2025-11-04T21:36:25.936Z" },
 ]
 
 [[package]]
@@ -709,7 +736,7 @@ wheels = [
 [[package]]
 name = "ode-test"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "diffrax" },
     { name = "jax" },
@@ -724,6 +751,7 @@ dependencies = [
 [package.optional-dependencies]
 gpu = [
     { name = "jax", extra = ["cuda12"] },
+    { name = "nvidia-cudss-cu12" },
 ]
 
 [package.dev-dependencies]
@@ -743,6 +771,7 @@ requires-dist = [
     { name = "numba", specifier = ">=0.61" },
     { name = "numba-cuda", specifier = ">=0.10" },
     { name = "numpy", specifier = ">=2.4.3" },
+    { name = "nvidia-cudss-cu12", marker = "extra == 'gpu'", specifier = ">=0.7.1.6" },
     { name = "scipy", specifier = ">=1.17.1" },
     { name = "triton", specifier = ">=3.6.0" },
 ]
