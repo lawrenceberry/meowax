@@ -5,14 +5,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Try to enable CUDA for the diagonal-update kernel.
-include(CheckLanguage)
-check_language(CUDA)
 if(CMAKE_CUDA_COMPILER)
   enable_language(CUDA)
-  set(HAVE_CUDA_LANG TRUE)
-else()
-  set(HAVE_CUDA_LANG FALSE)
+  set(CMAKE_CUDA_STANDARD 17)
+  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 endif()
 
 find_package(Python REQUIRED COMPONENTS Interpreter)
@@ -83,14 +79,12 @@ endforeach()
 
 if(RODAS5_CUDSS_READY)
   set(CUDSS_SOURCES native/rodas5_cudss_ffi.cc)
-  if(HAVE_CUDA_LANG)
+  set(RODAS5_HAS_CUDA_HELPER_SOURCE FALSE)
+  if(CMAKE_CUDA_COMPILER AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/native/cudss_diagonal_kernel.cu")
+    set(RODAS5_HAS_CUDA_HELPER_SOURCE TRUE)
     list(APPEND CUDSS_SOURCES native/cudss_diagonal_kernel.cu)
   endif()
   add_library(rodas5_cudss_ffi SHARED ${CUDSS_SOURCES})
-  if(HAVE_CUDA_LANG)
-    target_compile_definitions(rodas5_cudss_ffi PRIVATE HAVE_CUDA_DIAGONAL_KERNEL)
-    set_source_files_properties(native/cudss_diagonal_kernel.cu PROPERTIES CUDA_ARCHITECTURES "native")
-  endif()
   target_include_directories(
     rodas5_cudss_ffi
     PRIVATE
@@ -100,6 +94,14 @@ if(RODAS5_CUDSS_READY)
       ${CUDA_NVCC_INCLUDE_DIR}
       ${CUSPARSE_INCLUDE_DIR}
   )
+  if(RODAS5_HAS_CUDA_HELPER_SOURCE)
+    target_compile_definitions(rodas5_cudss_ffi PRIVATE HAVE_CUDA_DIAGONAL_KERNEL=1)
+    target_compile_options(
+      rodas5_cudss_ffi
+      PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --use_fast_math -U_GNU_SOURCE>
+    )
+  endif()
   target_link_directories(
     rodas5_cudss_ffi
     PRIVATE

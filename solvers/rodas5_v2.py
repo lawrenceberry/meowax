@@ -32,6 +32,7 @@ from jax import tree_util  # isort: skip  # noqa: E402
 from jax.experimental import sparse as jsparse  # isort: skip  # noqa: E402
 
 from solvers import _cudss_ffi  # noqa: E402
+from solvers import _cudss_pallas  # noqa: E402
 
 # fmt: off
 # Rodas5 W-transformed coefficients
@@ -241,6 +242,48 @@ def _sparse_structure_matches(items):
     )
 
 
+def _sparse_structure_matches_pair(first, second):
+    return (
+        np.array_equal(np.asarray(first.indptr), np.asarray(second.indptr))
+        and np.array_equal(np.asarray(first.indices), np.asarray(second.indices))
+        and int(first.nnz) == int(second.nnz)
+    )
+
+
+def _normalize_sparse_batch(batch, *, expected_shape=None):
+    if not isinstance(batch, SparseJacobianCSR):
+        return None
+    shape = tuple(batch.shape)
+    if expected_shape is not None and shape != expected_shape:
+        raise ValueError(f"Expected sparse Jacobian shape {expected_shape}, got {shape}")
+    return SparseJacobianCSR(
+        indptr=jnp.asarray(batch.indptr, dtype=jnp.int32),
+        indices=jnp.asarray(batch.indices, dtype=jnp.int32),
+        values=jnp.asarray(batch.values),
+        nnz=jnp.asarray(batch.nnz, dtype=jnp.int32),
+        shape=shape,
+    )
+
+
+def _try_vmap_sparse_batch(sparse_call, t, y, params_batch, *, expected_shape):
+    try:
+        batched = jax.vmap(lambda p: sparse_call(t, y, p))(params_batch)
+    except Exception:
+        return None
+    return _normalize_sparse_batch(batched, expected_shape=expected_shape)
+
+
+def _build_sparse_batch_host(sparse_call, t, y, params_batch, *, expected_shape):
+    items = [
+        _coerce_concrete_sparse_csr(
+            sparse_call(t, y, np.asarray(params_batch[i])),
+            expected_shape=expected_shape,
+        )
+        for i in range(int(params_batch.shape[0]))
+    ]
+    return _stack_sparse_batch(items)
+
+
 def _pad_sparse_batch(batch, target_size):
     current = int(batch.nnz.shape[0])
     if current == target_size:
@@ -369,6 +412,7 @@ def make_solver(
         _dynamic_sparse_values_batched = jax.vmap(lambda t, y, p: sparse_call(t, y, p).values)
 
     context_cache = {}
+    cudss_fused_available = _cudss_ffi.has_fused_step()
 
     def _get_context(n_vars, bs):
         key = (int(n_vars), int(bs))
@@ -523,7 +567,36 @@ def make_solver(
                 context_handle=np.uint64(cudss_handle),
             ).astype(jnp.float64)
 
+        def _cudss_step(dt, y, sparse_batch):
+            target = (
+                _cudss_ffi._CUDA_TARGET_STEP
+                if sparse_mode == "static"
+                else _cudss_ffi._CUDA_TARGET_STEP_DYNAMIC
+            )
+            stacked = jax.ffi.ffi_call(
+                target,
+                jax.ShapeDtypeStruct((2,) + y.shape, lu_dtype),
+                has_side_effect=True,
+                vmap_method="sequential",
+            )(
+                dt,
+                y.astype(lu_dtype),
+                sparse_batch.indptr,
+                sparse_batch.indices,
+                sparse_batch.values.astype(lu_dtype),
+                sparse_batch.nnz,
+                context_handle=np.uint64(cudss_handle),
+            )
+            return stacked[0].astype(jnp.float64), stacked[1].astype(jnp.float64)
+
         def _step_with_sparse_system(y, dt, sparse_batch, f_eval):
+            if (
+                use_cudss
+                and cudss_fused_available
+                and f is None
+                and sparse_mode in ("static", "dynamic_values")
+            ):
+                return _cudss_step(dt, y, sparse_batch)
             if use_cudss:
                 prepare_token = _cudss_prepare(dt, sparse_batch)
 
@@ -642,10 +715,12 @@ def make_solver(
                         if f is not None:
                             f_eval = lambda u: _f_batched(u, params_chunk)
                         else:
-                            f_eval = lambda u: _csr_matvec_batch(
-                                sparse_chunk,
+                            f_eval = lambda u: _cudss_pallas.batched_csr_matvec(
+                                sparse_chunk.indptr,
+                                sparse_chunk.indices,
+                                sparse_chunk.values.astype(matvec_dtype),
+                                sparse_chunk.nnz,
                                 u.astype(matvec_dtype),
-                                out_dtype=matvec_dtype,
                             ).astype(jnp.float64)
                         return _step_with_sparse_system(y, dt, sparse_chunk, f_eval)
 
@@ -662,10 +737,12 @@ def make_solver(
                         if f is not None:
                             f_eval = lambda u: _f_batched(u, params_chunk)
                         else:
-                            f_eval = lambda u: _csr_matvec_batch(
-                                sparse_chunk,
+                            f_eval = lambda u: _cudss_pallas.batched_csr_matvec(
+                                sparse_chunk.indptr,
+                                sparse_chunk.indices,
+                                sparse_chunk.values.astype(matvec_dtype),
+                                sparse_chunk.nnz,
                                 u.astype(matvec_dtype),
-                                out_dtype=matvec_dtype,
                             ).astype(jnp.float64)
                         return _step_with_sparse_system(y, dt, sparse_chunk, f_eval)
 
@@ -799,6 +876,7 @@ def make_solver(
         sparse_mode = "none"
         use_cudss = False
         cudss_handle = np.uint64(0)
+        expected_sparse_shape = (n_vars, n_vars)
         sparse_groups = SparseJacobianCSR(
             indptr=jnp.zeros((0, 0, 0), dtype=jnp.int32),
             indices=jnp.zeros((0, 0, 0), dtype=jnp.int32),
@@ -810,14 +888,21 @@ def make_solver(
         if jac_sparse_fn is not None:
             context = _get_context(n_vars, bs)
             if not depends_on_time and not depends_on_state:
-                sparse_items = [
-                    _coerce_concrete_sparse_csr(
-                        sparse_call(times[0], y0_arr, np.asarray(params_padded[i])),
-                        expected_shape=(n_vars, n_vars),
+                sparse_batch = _try_vmap_sparse_batch(
+                    sparse_call,
+                    times_jnp[0],
+                    y0_arr,
+                    params_padded,
+                    expected_shape=expected_sparse_shape,
+                )
+                if sparse_batch is None:
+                    sparse_batch = _build_sparse_batch_host(
+                        sparse_call,
+                        times[0],
+                        y0_arr,
+                        params_padded,
+                        expected_shape=expected_sparse_shape,
                     )
-                    for i in range(n_padded)
-                ]
-                sparse_batch = _stack_sparse_batch(sparse_items)
                 sparse_groups = _reshape_sparse_groups(sparse_batch, n_chunks, bs)
                 sparse_mode = "static"
                 use_cudss = _resolve_sparse_backend(context) == _SPARSE_BACKEND_CUDSS
@@ -825,15 +910,39 @@ def make_solver(
                     _cudss_ffi.reset_active(context.handle)
                     cudss_handle = np.uint64(context.handle)
             else:
-                sparse_items = [
-                    _coerce_concrete_sparse_csr(
-                        sparse_call(times[0], y0_arr, np.asarray(params_padded[i])),
-                        expected_shape=(n_vars, n_vars),
+                sample_sparse = _coerce_concrete_sparse_csr(
+                    sparse_call(times[0], y0_arr, np.asarray(params_padded[0])),
+                    expected_shape=expected_sparse_shape,
+                )
+                probe_t = (
+                    times[min(1, times.size - 1)] if depends_on_time else times[0]
+                )
+                if depends_on_state:
+                    probe_y = np.zeros_like(np.asarray(y0_arr))
+                    if probe_y.size:
+                        probe_y[-1] = 1.0
+                else:
+                    probe_y = np.asarray(y0_arr)
+                probe_sparse = _coerce_concrete_sparse_csr(
+                    sparse_call(probe_t, probe_y, np.asarray(params_padded[0])),
+                    expected_shape=expected_sparse_shape,
+                )
+                if _sparse_structure_matches_pair(sample_sparse, probe_sparse):
+                    sparse_batch = _try_vmap_sparse_batch(
+                        sparse_call,
+                        times_jnp[0],
+                        y0_arr,
+                        params_padded,
+                        expected_shape=expected_sparse_shape,
                     )
-                    for i in range(n_padded)
-                ]
-                if _sparse_structure_matches(sparse_items):
-                    sparse_batch = _stack_sparse_batch(sparse_items)
+                    if sparse_batch is None:
+                        sparse_batch = _build_sparse_batch_host(
+                            sparse_call,
+                            times[0],
+                            y0_arr,
+                            params_padded,
+                            expected_shape=expected_sparse_shape,
+                        )
                     sparse_groups = _reshape_sparse_groups(sparse_batch, n_chunks, bs)
                     sparse_mode = "dynamic_values"
                     use_cudss = _resolve_sparse_backend(context) == _SPARSE_BACKEND_CUDSS

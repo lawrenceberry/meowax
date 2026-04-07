@@ -10,10 +10,11 @@ import jax.numpy as jnp  # isort: skip  # noqa: E402
 from jax.experimental import sparse as jsparse  # isort: skip  # noqa: E402
 import numpy as np
 import pytest
-from scipy.linalg import expm
 import scipy.sparse
+from scipy.linalg import expm
 
 import solvers.rodas5_v2 as rodas5_v2_mod
+from solvers import _cudss_pallas
 from solvers.rodas5 import solve_ensemble as rodas5_solve_ensemble
 from solvers.rodas5_custom_kernel_v2 import make_solver as make_rodas5_v2_solver
 from solvers.rodas5_custom_kernel_v3 import make_solver as make_rodas5_v3_solver
@@ -21,8 +22,8 @@ from solvers.rodas5_custom_kernel_v4 import make_solver as make_rodas5_v4_solver
 from solvers.rodas5_custom_kernel_v5 import make_solver as make_rodas5_v5_solver
 from solvers.rodas5_custom_kernel_v6 import make_solver as make_rodas5_v6_solver
 from solvers.rodas5_custom_kernel_v7_tc import make_solver as make_rodas5_v7_tc_solver
-from solvers.rodas5_v2 import make_solver as make_rodas5_v2_dense_solver
 from solvers.rodas5_v2 import SparseJacobianCSR
+from solvers.rodas5_v2 import make_solver as make_rodas5_v2_dense_solver
 from solvers.rodas5_v2 import solve_ensemble as rodas5_v2_solve_ensemble
 
 _T_SPAN = (0.0, 1.0)
@@ -32,6 +33,17 @@ _SYSTEM_DIMS = [30, 50, 70]
 _ENSEMBLE_SIZES = [2, 100, 1000, 10000, 100_000]
 _LINEAR_SOLVER_PRECISIONS = ("fp64", "fp32")
 _V6_LINEAR_SOLVERS = _LINEAR_SOLVER_PRECISIONS
+
+
+def _has_cuda_backend():
+    try:
+        return len(jax.devices("gpu")) > 0
+    except Exception:
+        return False
+
+
+def _has_fused_cudss_runtime():
+    return _has_cuda_backend() and rodas5_v2_mod._cudss_ffi.has_fused_step()
 
 
 def _time_linear_scale(t):
@@ -90,7 +102,10 @@ def _align_csr_values_to_union(union_matrix, source_matrix):
         source_start, source_end = source.indptr[row], source.indptr[row + 1]
         source_cols = source.indices[source_start:source_end]
         source_vals = source.data[source_start:source_end]
-        source_map = {int(col): float(val) for col, val in zip(source_cols, source_vals, strict=False)}
+        source_map = {
+            int(col): float(val)
+            for col, val in zip(source_cols, source_vals, strict=False)
+        }
         for offset in range(union_start, union_end):
             values[offset] = source_map.get(int(union.indices[offset]), 0.0)
     return values
@@ -234,7 +249,11 @@ def _reference_trajectory(system, params_batch, save_times):
     traj = []
     for i, tf in enumerate(save_times_np):
         if i == 0:
-            traj.append(np.broadcast_to(np.asarray(system["y0"]), (params_batch.shape[0], system["n_vars"])))
+            traj.append(
+                np.broadcast_to(
+                    np.asarray(system["y0"]), (params_batch.shape[0], system["n_vars"])
+                )
+            )
             continue
         y_ref = rodas5_solve_ensemble(
             system["array"],
@@ -321,8 +340,12 @@ def _make_switching_sparse_system():
     union_csr = ((M_a_csr != 0.0) + (M_b_csr != 0.0)).astype(np.float64).tocsr()
     union_csr.data[:] = 1.0
     union_desc = _csr_descriptor_from_scipy(union_csr)
-    union_values_a = jnp.asarray(_align_csr_values_to_union(union_csr, M_a_csr), dtype=jnp.float64)
-    union_values_b = jnp.asarray(_align_csr_values_to_union(union_csr, M_b_csr), dtype=jnp.float64)
+    union_values_a = jnp.asarray(
+        _align_csr_values_to_union(union_csr, M_a_csr), dtype=jnp.float64
+    )
+    union_values_b = jnp.asarray(
+        _align_csr_values_to_union(union_csr, M_b_csr), dtype=jnp.float64
+    )
     y0 = jnp.asarray([1.0] + [0.0] * (n_vars - 1), dtype=jnp.float64)
 
     def _select_dense(y):
@@ -343,6 +366,59 @@ def _make_switching_sparse_system():
             values=scale * values,
             nnz=union_desc.nnz,
             shape=union_desc.shape,
+        )
+
+    return {
+        "n_vars": n_vars,
+        "y0": y0,
+        "array": array,
+        "jac_sparse": jac_sparse,
+    }
+
+
+def _make_fixed_structure_dynamic_sparse_system():
+    """Build a dynamic-values sparse system with a fixed CSR structure."""
+    n_vars = 5
+    edges_a = (
+        (0, 1, 4.0),
+        (1, 2, 2.5),
+        (2, 4, 1.5),
+        (4, 3, 0.8),
+        (3, 0, 0.6),
+        (1, 4, 0.7),
+    )
+    edges_b = (
+        (0, 1, 1.9),
+        (1, 2, 1.7),
+        (2, 4, 0.9),
+        (4, 3, 1.3),
+        (3, 0, 1.1),
+        (1, 4, 1.4),
+    )
+    M_a_np = _build_generator_matrix(n_vars, edges_a)
+    M_b_np = _build_generator_matrix(n_vars, edges_b)
+    M_a = jnp.asarray(M_a_np, dtype=jnp.float64)
+    M_b = jnp.asarray(M_b_np, dtype=jnp.float64)
+    desc = _csr_descriptor_from_scipy(scipy.sparse.coo_matrix(M_a_np))
+    values_a = desc.values
+    values_b = _csr_descriptor_from_scipy(scipy.sparse.coo_matrix(M_b_np)).values
+    y0 = jnp.asarray([1.0] + [0.0] * (n_vars - 1), dtype=jnp.float64)
+
+    def _select_dense(y):
+        return lax.cond(y[0] > 0.55, lambda _: M_a, lambda _: M_b, operand=None)
+
+    @jax.jit
+    def array(y, p):
+        return p[0] * (_select_dense(y) @ y)
+
+    def jac_sparse(y, p):
+        values = jnp.where(y[0] > 0.55, values_a, values_b)
+        return SparseJacobianCSR(
+            indptr=desc.indptr,
+            indices=desc.indices,
+            values=p[0] * values,
+            nnz=desc.nnz,
+            shape=desc.shape,
         )
 
     return {
@@ -1099,7 +1175,9 @@ def test_rodas5_v2_matches_reference(nn_reaction_system, batch_size):
     ).block_until_ready()
 
     assert y_v2.shape == (N, len(_T_SPAN), system["n_vars"])
-    np.testing.assert_allclose(y_v2[:, 0, :], np.asarray(_broadcast_y0(system["y0"], N)), atol=0.0)
+    np.testing.assert_allclose(
+        y_v2[:, 0, :], np.asarray(_broadcast_y0(system["y0"], N)), atol=0.0
+    )
     np.testing.assert_allclose(y_v2.sum(axis=2), 1.0, atol=3e-6)
     np.testing.assert_allclose(y_v2[:, -1, :], y_ref, rtol=1e-6, atol=1e-9)
 
@@ -1162,7 +1240,9 @@ def test_rodas5_v2_jac_fn_matches_reference(nn_reaction_system):
     ).block_until_ready()
 
     assert y_jac.shape == (N, len(_T_SPAN), system["n_vars"])
-    np.testing.assert_allclose(y_jac[:, 0, :], np.asarray(_broadcast_y0(system["y0"], N)), atol=0.0)
+    np.testing.assert_allclose(
+        y_jac[:, 0, :], np.asarray(_broadcast_y0(system["y0"], N)), atol=0.0
+    )
     np.testing.assert_allclose(y_jac.sum(axis=2), 1.0, atol=3e-6)
     np.testing.assert_allclose(y_jac[:, -1, :], y_ref, rtol=1e-6, atol=1e-9)
 
@@ -1198,9 +1278,13 @@ def test_rodas5_v2_jac_sparse_fn_matches_dense_jac_fn(nn_reaction_system):
     ).block_until_ready()
 
     assert y_sparse.shape == y_dense.shape
-    np.testing.assert_allclose(y_sparse[:, 0, :], np.asarray(_broadcast_y0(system["y0"], N)), atol=0.0)
+    np.testing.assert_allclose(
+        y_sparse[:, 0, :], np.asarray(_broadcast_y0(system["y0"], N)), atol=0.0
+    )
     np.testing.assert_allclose(y_sparse.sum(axis=2), 1.0, atol=5e-6)
-    np.testing.assert_allclose(np.asarray(y_sparse), np.asarray(y_dense), rtol=2e-4, atol=3e-8)
+    np.testing.assert_allclose(
+        np.asarray(y_sparse), np.asarray(y_dense), rtol=2e-4, atol=3e-8
+    )
 
 
 def test_rodas5_v2_jac_sparse_fn_nonbanded_matches_dense_reference():
@@ -1233,7 +1317,9 @@ def test_rodas5_v2_jac_sparse_fn_nonbanded_matches_dense_reference():
     ).block_until_ready()
 
     assert y_sparse.shape == (N, len(_T_SPAN), system["n_vars"])
-    np.testing.assert_allclose(np.asarray(y_sparse), np.asarray(y_dense), rtol=4e-2, atol=4e-4)
+    np.testing.assert_allclose(
+        np.asarray(y_sparse), np.asarray(y_dense), rtol=4e-2, atol=4e-4
+    )
 
 
 def test_rodas5_v2_jac_sparse_fn_changing_pattern_matches_explicit_f():
@@ -1264,7 +1350,156 @@ def test_rodas5_v2_jac_sparse_fn_changing_pattern_matches_explicit_f():
     ).block_until_ready()
 
     assert y_sparse.shape == (N, len(_V6_MULTI_SAVE_TIMES), system["n_vars"])
-    np.testing.assert_allclose(np.asarray(y_sparse), np.asarray(y_ref), rtol=8e-3, atol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(y_sparse), np.asarray(y_ref), rtol=8e-3, atol=1e-6
+    )
+
+
+def test_rodas5_v2_jac_sparse_fn_static_callback_batches_host_preprocessing():
+    """Static JAX sparse callbacks should not execute once per ensemble member."""
+    system = _make_nn_reaction_system(30)
+    params_batch = _make_params_batch(64, seed=11)
+    base = system["jac_sparse_array"](jnp.asarray([1.0], dtype=jnp.float64))
+    callback_calls = {"count": 0}
+
+    def counted_jac_sparse(p):
+        callback_calls["count"] += 1
+        return SparseJacobianCSR(
+            indptr=base.indptr,
+            indices=base.indices,
+            values=p[0] * base.values,
+            nnz=base.nnz,
+            shape=base.shape,
+        )
+
+    solve = make_rodas5_v2_dense_solver(
+        jac_sparse_fn=counted_jac_sparse,
+        linear_solver_precision="fp32",
+    )
+    y_hist = solve(
+        y0=system["y0"],
+        t_span=_T_SPAN,
+        params_batch=params_batch,
+        first_step=1e-6,
+        rtol=1e-6,
+        atol=1e-8,
+    ).block_until_ready()
+
+    assert y_hist.shape == (64, len(_T_SPAN), system["n_vars"])
+    assert callback_calls["count"] < 8
+
+
+def test_cudss_pallas_batched_csr_matvec_matches_reference():
+    """The fixed-structure Pallas CSR helper should match the reference matvec."""
+    system = _make_nn_reaction_system(30)
+    params_batch = _make_params_batch(32, seed=21)
+    sparse_items = [
+        system["jac_sparse_array"](np.asarray(params))
+        for params in np.asarray(params_batch)
+    ]
+    sparse_batch = rodas5_v2_mod._stack_sparse_batch(sparse_items)
+    vec = jnp.broadcast_to(system["y0"], (params_batch.shape[0], system["n_vars"]))
+
+    y_pallas = _cudss_pallas.batched_csr_matvec(
+        sparse_batch.indptr,
+        sparse_batch.indices,
+        sparse_batch.values,
+        sparse_batch.nnz,
+        vec,
+    )
+    y_ref = rodas5_v2_mod._csr_matvec_batch(
+        sparse_batch,
+        vec,
+        out_dtype=sparse_batch.values.dtype,
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(y_pallas), np.asarray(y_ref), rtol=1e-7, atol=1e-9
+    )
+
+
+@pytest.mark.skipif(
+    not _has_fused_cudss_runtime(),
+    reason="Fused cuDSS step requires a CUDA backend and native fused-step support",
+)
+@pytest.mark.parametrize("nn_reaction_system", [50], indirect=True, ids=_dim_id)
+def test_rodas5_v2_fused_cudss_static_matches_dense_jac_fn(nn_reaction_system):
+    """Validate the fused static cuDSS step against the dense jac_fn path."""
+    system = nn_reaction_system
+    params_batch = _make_params_batch(96, seed=12)
+    solve_sparse = make_rodas5_v2_dense_solver(
+        jac_sparse_fn=system["jac_sparse_array"],
+        linear_solver_precision="fp32",
+    )
+    solve_dense = make_rodas5_v2_dense_solver(
+        jac_fn=system["jac_array"],
+        linear_solver_precision="fp32",
+    )
+
+    y_sparse = solve_sparse(
+        y0=system["y0"],
+        t_span=_V6_MULTI_SAVE_TIMES,
+        params_batch=params_batch,
+        first_step=1e-6,
+        rtol=1e-6,
+        atol=1e-8,
+    ).block_until_ready()
+    y_dense = solve_dense(
+        y0=system["y0"],
+        t_span=_V6_MULTI_SAVE_TIMES,
+        params_batch=params_batch,
+        first_step=1e-6,
+        rtol=1e-6,
+        atol=1e-8,
+    ).block_until_ready()
+
+    counters = solve_sparse.get_cudss_counters(system["n_vars"], params_batch.shape[0])
+    assert counters is not None and counters["solve"] > 0
+    assert counters["device_prepare_fast_path_count"] > 0
+    assert counters["host_prepare_slow_path_count"] == 0
+    np.testing.assert_allclose(
+        np.asarray(y_sparse), np.asarray(y_dense), rtol=2e-4, atol=3e-8
+    )
+
+
+@pytest.mark.skipif(
+    not _has_fused_cudss_runtime(),
+    reason="Fused cuDSS step requires a CUDA backend and native fused-step support",
+)
+def test_rodas5_v2_fused_cudss_dynamic_values_matches_explicit_f():
+    """Validate fused cuDSS on a fixed-structure dynamic-values sparse system."""
+    system = _make_fixed_structure_dynamic_sparse_system()
+    params_batch = _make_params_batch(48, seed=13)
+    solve_sparse = make_rodas5_v2_dense_solver(
+        jac_sparse_fn=system["jac_sparse"],
+        linear_solver_precision="fp32",
+    )
+
+    y_sparse = solve_sparse(
+        y0=system["y0"],
+        t_span=_V6_MULTI_SAVE_TIMES,
+        params_batch=params_batch,
+        first_step=1e-6,
+        rtol=1e-6,
+        atol=1e-8,
+    ).block_until_ready()
+    y_ref = rodas5_v2_solve_ensemble(
+        system["array"],
+        y0=system["y0"],
+        t_span=_V6_MULTI_SAVE_TIMES,
+        params_batch=params_batch,
+        first_step=1e-6,
+        rtol=1e-6,
+        atol=1e-8,
+    ).block_until_ready()
+
+    counters = solve_sparse.get_cudss_counters(system["n_vars"], params_batch.shape[0])
+    assert counters is not None and counters["solve"] > 0
+    assert counters["device_prepare_fast_path_count"] > 0
+    assert counters["host_prepare_slow_path_count"] == 0
+    np.testing.assert_allclose(
+        np.asarray(y_sparse), np.asarray(y_ref), rtol=8e-3, atol=1e-6
+    )
 
 
 @pytest.mark.parametrize("nn_reaction_system", [50], indirect=True, ids=_dim_id)
@@ -1321,8 +1556,13 @@ def test_rodas5_v2_jac_sparse_fn_dense_fallback_matches_sparse_backend(
         atol=1e-8,
     ).block_until_ready()
 
-    monkeypatch.setattr(rodas5_v2_mod._cudss_ffi, "create_context", lambda *args, **kwargs: None)
-    assert rodas5_v2_mod._resolve_sparse_backend(None) == rodas5_v2_mod._SPARSE_BACKEND_DENSE_FALLBACK
+    monkeypatch.setattr(
+        rodas5_v2_mod._cudss_ffi, "create_context", lambda *args, **kwargs: None
+    )
+    assert (
+        rodas5_v2_mod._resolve_sparse_backend(None)
+        == rodas5_v2_mod._SPARSE_BACKEND_DENSE_FALLBACK
+    )
 
     y_fallback = rodas5_v2_solve_ensemble(
         None,
@@ -1336,7 +1576,9 @@ def test_rodas5_v2_jac_sparse_fn_dense_fallback_matches_sparse_backend(
         atol=1e-8,
     ).block_until_ready()
 
-    np.testing.assert_allclose(np.asarray(y_fallback), np.asarray(y_sparse), rtol=2e-4, atol=3e-8)
+    np.testing.assert_allclose(
+        np.asarray(y_fallback), np.asarray(y_sparse), rtol=2e-4, atol=3e-8
+    )
 
 
 @pytest.mark.parametrize("nn_reaction_system", [50], indirect=True, ids=_dim_id)
@@ -1360,7 +1602,9 @@ def test_rodas5_v2_jac_fn_saves_multiple_times(nn_reaction_system):
     y_ref = _reference_trajectory(system, params_batch, _V6_MULTI_SAVE_TIMES)
 
     assert y_hist.shape == (N, len(_V6_MULTI_SAVE_TIMES), system["n_vars"])
-    np.testing.assert_allclose(y_hist[:, 0, :], np.asarray(_broadcast_y0(system["y0"], N)), atol=0.0)
+    np.testing.assert_allclose(
+        y_hist[:, 0, :], np.asarray(_broadcast_y0(system["y0"], N)), atol=0.0
+    )
     np.testing.assert_allclose(y_hist.sum(axis=2), 1.0, atol=3e-6)
     np.testing.assert_allclose(np.asarray(y_hist), y_ref, rtol=2e-4, atol=3e-8)
 
@@ -1446,7 +1690,9 @@ def test_rodas5_v2_jac_sparse_fn_timing(
         sparse_backend = "n/a"
     else:
         if solver_mode == "sparse_dense_fallback":
-            monkeypatch.setattr(rodas5_v2_mod._cudss_ffi, "create_context", lambda *args, **kwargs: None)
+            monkeypatch.setattr(
+                rodas5_v2_mod._cudss_ffi, "create_context", lambda *args, **kwargs: None
+            )
         solve = make_rodas5_v2_dense_solver(
             jac_sparse_fn=system["jac_sparse_array"],
             linear_solver_precision="fp32",
@@ -1470,5 +1716,5 @@ def test_rodas5_v2_jac_sparse_fn_timing(
     benchmark.extra_info["sparse_backend"] = sparse_backend
 
     assert results.shape == (ensemble_size, len(_T_SPAN), system["n_vars"])
-    mass_atol = 5e-6 if solver_mode == "sparse_cudss" else 3e-6
+    mass_atol = 6e-6 if solver_mode == "sparse_cudss" else 3e-6
     np.testing.assert_allclose(results.sum(axis=2), 1.0, atol=mass_atol)

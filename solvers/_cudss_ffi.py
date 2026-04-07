@@ -14,6 +14,8 @@ _CUDA_TARGET_PREPARE = "rodas5_cudss_prepare"
 _CUDA_TARGET_SOLVE = "rodas5_cudss_solve"
 _CUDA_TARGET_PREPARE_DYNAMIC = "rodas5_cudss_prepare_dynamic"
 _CUDA_TARGET_SOLVE_DYNAMIC = "rodas5_cudss_solve_dynamic"
+_CUDA_TARGET_STEP = "rodas5_cudss_step"
+_CUDA_TARGET_STEP_DYNAMIC = "rodas5_cudss_step_dynamic"
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 _BUILD_DIR = _ROOT / "build" / "rodas5_cudss_ffi"
@@ -32,11 +34,14 @@ def is_enabled() -> bool:
 
 
 def _native_sources() -> tuple[pathlib.Path, ...]:
-    return (
+    sources = [
         _ROOT / "CMakeLists.txt",
         _ROOT / "native" / "rodas5_cudss_ffi.cc",
-        _ROOT / "native" / "cudss_diagonal_kernel.cu",
-    )
+    ]
+    cuda_helper = _ROOT / "native" / "cudss_diagonal_kernel.cu"
+    if cuda_helper.exists():
+        sources.append(cuda_helper)
+    return tuple(sources)
 
 
 def _needs_rebuild() -> bool:
@@ -80,13 +85,38 @@ def _cmake_executable() -> str | None:
     return shutil.which("cmake")
 
 
+def _nvcc_executable() -> str | None:
+    direct = pathlib.Path("/usr/bin/nvcc")
+    if direct.exists():
+        return str(direct)
+    direct = pathlib.Path("/usr/local/cuda/bin/nvcc")
+    if direct.exists():
+        return str(direct)
+    return shutil.which("nvcc")
+
+
+def _cuda_host_compiler() -> str | None:
+    candidates = [
+        pathlib.Path("/usr/bin/g++-13"),
+        pathlib.Path("/usr/bin/x86_64-linux-gnu-g++-13"),
+        pathlib.Path("/usr/bin/g++-14"),
+        pathlib.Path("/usr/bin/x86_64-linux-gnu-g++-14"),
+    ]
+    for path in candidates:
+        if path.exists():
+            return str(path)
+    return shutil.which("g++-13") or shutil.which("g++-14")
+
+
 def _build_native_library() -> pathlib.Path | None:
     cmake = _cmake_executable()
     ninja = shutil.which("ninja") or str(pathlib.Path(sys.executable).resolve().parent / "ninja")
     include_dirs = _cuda_include_dirs()
     lib_dirs = _cuda_library_dirs()
+    nvcc = _nvcc_executable()
+    host_compiler = _cuda_host_compiler()
     if cmake is None or not include_dirs or not lib_dirs:
-        return None
+        return _LIB_PATH if _LIB_PATH.exists() else None
 
     _BUILD_DIR.mkdir(parents=True, exist_ok=True)
     configure_cmd = [
@@ -108,6 +138,10 @@ def _build_native_library() -> pathlib.Path | None:
         f"-DCUSPARSE_LIBRARY_DIR={lib_dirs[2]}",
         f"-DCUBLAS_LIBRARY_DIR={lib_dirs[3]}",
     ]
+    if nvcc is not None:
+        configure_cmd.append(f"-DCMAKE_CUDA_COMPILER={nvcc}")
+    if host_compiler is not None:
+        configure_cmd.append(f"-DCMAKE_CUDA_HOST_COMPILER={host_compiler}")
     subprocess.run(configure_cmd, check=True, cwd=_ROOT)
     subprocess.run([cmake, "--build", str(_BUILD_DIR), "--target", "rodas5_cudss_ffi"], check=True, cwd=_ROOT)
     return _LIB_PATH if _LIB_PATH.exists() else None
@@ -134,6 +168,18 @@ def _load_library():
     lib.rodas5_cudss_factorization_count.restype = ctypes.c_uint64
     lib.rodas5_cudss_solve_count.argtypes = [ctypes.c_uint64]
     lib.rodas5_cudss_solve_count.restype = ctypes.c_uint64
+    lib.rodas5_cudss_host_prepare_slow_path_count.argtypes = [ctypes.c_uint64]
+    lib.rodas5_cudss_host_prepare_slow_path_count.restype = ctypes.c_uint64
+    lib.rodas5_cudss_device_prepare_fast_path_count.argtypes = [ctypes.c_uint64]
+    lib.rodas5_cudss_device_prepare_fast_path_count.restype = ctypes.c_uint64
+    lib.rodas5_cudss_graph_capture_count.argtypes = [ctypes.c_uint64]
+    lib.rodas5_cudss_graph_capture_count.restype = ctypes.c_uint64
+    lib.rodas5_cudss_graph_replay_count.argtypes = [ctypes.c_uint64]
+    lib.rodas5_cudss_graph_replay_count.restype = ctypes.c_uint64
+    lib.rodas5_cudss_mt_analysis_enabled.argtypes = [ctypes.c_uint64]
+    lib.rodas5_cudss_mt_analysis_enabled.restype = ctypes.c_int
+    lib.rodas5_cudss_has_fused_step.argtypes = []
+    lib.rodas5_cudss_has_fused_step.restype = ctypes.c_int
     _LIB = lib
     return lib
 
@@ -166,6 +212,16 @@ def register_cuda_targets() -> bool:
             jax.ffi.pycapsule(lib.rodas5_cudss_solve),
             platform="CUDA",
         )
+        jax.ffi.register_ffi_target(
+            _CUDA_TARGET_STEP,
+            jax.ffi.pycapsule(lib.rodas5_cudss_step),
+            platform="CUDA",
+        )
+        jax.ffi.register_ffi_target(
+            _CUDA_TARGET_STEP_DYNAMIC,
+            jax.ffi.pycapsule(lib.rodas5_cudss_step_dynamic),
+            platform="CUDA",
+        )
         _REGISTERED = True
         return True
 
@@ -181,6 +237,21 @@ class CuDSSContext:
             "analysis": int(self._lib.rodas5_cudss_analysis_count(self.handle)),
             "factorization": int(self._lib.rodas5_cudss_factorization_count(self.handle)),
             "solve": int(self._lib.rodas5_cudss_solve_count(self.handle)),
+            "host_prepare_slow_path_count": int(
+                self._lib.rodas5_cudss_host_prepare_slow_path_count(self.handle)
+            ),
+            "device_prepare_fast_path_count": int(
+                self._lib.rodas5_cudss_device_prepare_fast_path_count(self.handle)
+            ),
+            "graph_capture_count": int(
+                self._lib.rodas5_cudss_graph_capture_count(self.handle)
+            ),
+            "graph_replay_count": int(
+                self._lib.rodas5_cudss_graph_replay_count(self.handle)
+            ),
+            "mt_analysis_enabled": bool(
+                self._lib.rodas5_cudss_mt_analysis_enabled(self.handle)
+            ),
         }
 
 
@@ -209,3 +280,10 @@ def reset_active(handle: int) -> None:
     if lib is None:
         return
     lib.rodas5_cudss_reset_active(int(handle))
+
+
+def has_fused_step() -> bool:
+    lib = _load_library()
+    if lib is None:
+        return False
+    return bool(lib.rodas5_cudss_has_fused_step())
