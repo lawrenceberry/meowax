@@ -218,9 +218,9 @@ def _make_rodas5_step(jac_fn, n_vars, linear_solver):
 
             def store_m_col(j_s, carry):
                 mij = _tuple_select(row_i, j_s)
-                m_ref.at[:, pl.ds(_m_idx(i_s, j_s), 1)][...] = mij.astype(
-                    m_ref.dtype
-                )[:, None]
+                m_ref.at[:, pl.ds(_m_idx(i_s, j_s), 1)][...] = mij.astype(m_ref.dtype)[
+                    :, None
+                ]
                 return carry
 
             return jax.lax.fori_loop(0, nv, store_m_col, carry)

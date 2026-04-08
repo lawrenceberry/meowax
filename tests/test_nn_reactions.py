@@ -170,7 +170,11 @@ def _reference_trajectory(system, params_batch, save_times):
     traj = []
     for i, tf in enumerate(save_times_np):
         if i == 0:
-            traj.append(np.broadcast_to(np.asarray(system["y0"]), (params_batch.shape[0], system["n_vars"])))
+            traj.append(
+                np.broadcast_to(
+                    np.asarray(system["y0"]), (params_batch.shape[0], system["n_vars"])
+                )
+            )
             continue
         y_ref = rodas5_solve_ensemble(
             system["array"],
@@ -930,7 +934,9 @@ def test_rodas5_v2_matches_reference(nn_reaction_system, batch_size):
     ).block_until_ready()
 
     assert y_v2.shape == (N, len(_T_SPAN), system["n_vars"])
-    np.testing.assert_allclose(y_v2[:, 0, :], np.asarray(_broadcast_y0(system["y0"], N)), atol=0.0)
+    np.testing.assert_allclose(
+        y_v2[:, 0, :], np.asarray(_broadcast_y0(system["y0"], N)), atol=0.0
+    )
     np.testing.assert_allclose(y_v2.sum(axis=2), 1.0, atol=3e-6)
     np.testing.assert_allclose(y_v2[:, -1, :], y_ref, rtol=1e-6, atol=1e-9)
 
@@ -992,7 +998,9 @@ def test_rodas5_v2_jac_fn_matches_reference(nn_reaction_system):
     ).block_until_ready()
 
     assert y_jac.shape == (N, len(_T_SPAN), system["n_vars"])
-    np.testing.assert_allclose(y_jac[:, 0, :], np.asarray(_broadcast_y0(system["y0"], N)), atol=0.0)
+    np.testing.assert_allclose(
+        y_jac[:, 0, :], np.asarray(_broadcast_y0(system["y0"], N)), atol=0.0
+    )
     np.testing.assert_allclose(y_jac.sum(axis=2), 1.0, atol=3e-6)
     np.testing.assert_allclose(y_jac[:, -1, :], y_ref, rtol=1e-6, atol=1e-9)
 
@@ -1013,9 +1021,13 @@ def test_rodas5_v2_fp32_linear_solver_matches_fp64_baseline(nn_reaction_system):
         atol=1e-8,
     )
 
-    solve_fp64 = make_rodas5_v2_linear_solver(system["jac_array"], linear_solver_precision="fp64")
+    solve_fp64 = make_rodas5_v2_linear_solver(
+        system["jac_array"], linear_solver_precision="fp64"
+    )
     y_fp64 = solve_fp64(**solve_kwargs).block_until_ready()
-    solve_fp32 = make_rodas5_v2_linear_solver(system["jac_array"], linear_solver_precision="fp32")
+    solve_fp32 = make_rodas5_v2_linear_solver(
+        system["jac_array"], linear_solver_precision="fp32"
+    )
     y_fp32 = solve_fp32(**solve_kwargs).block_until_ready()
 
     np.testing.assert_allclose(
@@ -1030,7 +1042,9 @@ def test_rodas5_v2_jac_fn_saves_multiple_times(nn_reaction_system):
     system = nn_reaction_system
     params_batch = _make_params_batch(N, seed=0)
 
-    solve_linear = make_rodas5_v2_linear_solver(system["jac_array"], linear_solver_precision="fp32")
+    solve_linear = make_rodas5_v2_linear_solver(
+        system["jac_array"], linear_solver_precision="fp32"
+    )
     y_hist = solve_linear(
         y0=system["y0"],
         t_span=_V6_MULTI_SAVE_TIMES,
@@ -1042,7 +1056,9 @@ def test_rodas5_v2_jac_fn_saves_multiple_times(nn_reaction_system):
     y_ref = _reference_trajectory(system, params_batch, _V6_MULTI_SAVE_TIMES)
 
     assert y_hist.shape == (N, len(_V6_MULTI_SAVE_TIMES), system["n_vars"])
-    np.testing.assert_allclose(y_hist[:, 0, :], np.asarray(_broadcast_y0(system["y0"], N)), atol=0.0)
+    np.testing.assert_allclose(
+        y_hist[:, 0, :], np.asarray(_broadcast_y0(system["y0"], N)), atol=0.0
+    )
     np.testing.assert_allclose(y_hist.sum(axis=2), 1.0, atol=3e-6)
     np.testing.assert_allclose(np.asarray(y_hist), y_ref, rtol=2e-4, atol=3e-8)
 

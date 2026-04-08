@@ -81,7 +81,9 @@ def make_solver(
         jax.jit,
         static_argnames=("n_save", "max_steps"),
     )
-    def _solve_impl(y0_arr, params_groups, times, *, n_save, max_steps, dt0, rtol, atol):
+    def _solve_impl(
+        y0_arr, params_groups, times, *, n_save, max_steps, dt0, rtol, atol
+    ):
         n_vars = y0_arr.shape[0]
         bs = params_groups.shape[1]
         eye_lu = jnp.eye(n_vars, dtype=lu_dtype)[None, :, :]
@@ -163,7 +165,11 @@ def make_solver(
 
         def _solve_chunk(params_chunk):
             y_init = jnp.broadcast_to(y0_arr, (bs, n_vars)).copy()
-            hist_init = jnp.zeros((bs, n_save, n_vars), dtype=jnp.float64).at[:, 0, :].set(y_init)
+            hist_init = (
+                jnp.zeros((bs, n_save, n_vars), dtype=jnp.float64)
+                .at[:, 0, :]
+                .set(y_init)
+            )
             t_init = jnp.full((bs,), times[0], dtype=jnp.float64)
             dt_init = jnp.full((bs,), dt0, dtype=jnp.float64)
             save_idx_init = jnp.ones((bs,), dtype=jnp.int32)
@@ -205,7 +211,9 @@ def make_solver(
                     jnp.abs(t_new - next_target)
                     <= 1e-12 * jnp.maximum(1.0, jnp.abs(next_target))
                 )
-                slot_mask = jax.nn.one_hot(save_idx, n_save, dtype=jnp.bool_) & reached[:, None]
+                slot_mask = (
+                    jax.nn.one_hot(save_idx, n_save, dtype=jnp.bool_) & reached[:, None]
+                )
                 hist_new = jnp.where(slot_mask[:, :, None], y_out[:, None, :], hist)
                 save_idx_new = save_idx + reached.astype(jnp.int32)
 
@@ -241,14 +249,20 @@ def make_solver(
         N = int(params_batch_arr.shape[0])
         times = np.asarray(t_span, dtype=np.float64)
         if times.ndim != 1:
-            raise ValueError(f"t_span must be a 1D array of save times, got shape {times.shape}")
+            raise ValueError(
+                f"t_span must be a 1D array of save times, got shape {times.shape}"
+            )
         if times.size < 2:
-            raise ValueError(f"t_span must contain at least 2 save times, got {times.size}")
+            raise ValueError(
+                f"t_span must contain at least 2 save times, got {times.size}"
+            )
         if not np.all(np.diff(times) > 0.0):
             raise ValueError("t_span must be strictly increasing")
 
         times_jnp = jnp.asarray(times, dtype=jnp.float64)
-        dt0 = jnp.float64(first_step if first_step is not None else (times[-1] - times[0]) * 1e-6)
+        dt0 = jnp.float64(
+            first_step if first_step is not None else (times[-1] - times[0]) * 1e-6
+        )
         bs = N if batch_size is None else batch_size
 
         n_chunks = (N + bs - 1) // bs

@@ -55,7 +55,9 @@ def _unblocked_lu_block(block):
         if j + 1 < bs:
             l_col = lu[:, j + 1 :, j] / pivot[:, None]
             lu = lu.at[:, j + 1 :, j].set(l_col)
-            trailing = lu[:, j + 1 :, j + 1 :] - l_col[:, :, None] * lu[:, None, j, j + 1 :]
+            trailing = (
+                lu[:, j + 1 :, j + 1 :] - l_col[:, :, None] * lu[:, None, j, j + 1 :]
+            )
             lu = lu.at[:, j + 1 :, j + 1 :].set(trailing)
     return lu
 
@@ -97,7 +99,9 @@ def _blocked_lu_nopivot(a, *, precision):
         l21 = jnp.swapaxes(l21_t, 1, 2)
         lu = lu.at[:, k + bs :, k : k + bs].set(l21)
 
-        trailing = lu[:, k + bs :, k + bs :] - _batched_matmul(l21, u12, precision=precision)
+        trailing = lu[:, k + bs :, k + bs :] - _batched_matmul(
+            l21, u12, precision=precision
+        )
         lu = lu.at[:, k + bs :, k + bs :].set(trailing)
     return lu
 
@@ -116,11 +120,15 @@ def make_solver(jac_fn):
     """Create the experimental blocked-LU Rodas5 solver."""
     m0 = jnp.asarray(jac_fn(jnp.float64(0.0)), dtype=jnp.float64)
     if m0.ndim != 2 or m0.shape[0] != m0.shape[1]:
-        raise ValueError(f"jac_fn(0.0) must be square with shape (n, n), got {m0.shape}")
+        raise ValueError(
+            f"jac_fn(0.0) must be square with shape (n, n), got {m0.shape}"
+        )
 
     n_vars = int(m0.shape[0])
     n_pad = _pad_dim(n_vars)
-    dot_precision = _DOT_PRECISION if jax.default_backend() != "cpu" else lax.Precision.DEFAULT
+    dot_precision = (
+        _DOT_PRECISION if jax.default_backend() != "cpu" else lax.Precision.DEFAULT
+    )
 
     @functools.partial(
         jax.jit,
@@ -129,7 +137,11 @@ def make_solver(jac_fn):
     def _solve_impl(y0_batch, times, *, n_save, max_steps, dt0, rtol, atol):
         n_batch = y0_batch.shape[0]
         y = y0_batch
-        hist = jnp.zeros((n_batch, n_save, n_vars), dtype=jnp.float64).at[:, 0, :].set(y0_batch)
+        hist = (
+            jnp.zeros((n_batch, n_save, n_vars), dtype=jnp.float64)
+            .at[:, 0, :]
+            .set(y0_batch)
+        )
         t = jnp.full((n_batch,), times[0], dtype=jnp.float64)
         dt_v = jnp.full((n_batch,), dt0, dtype=jnp.float64)
         save_idx = jnp.ones((n_batch,), dtype=jnp.int32)
@@ -178,7 +190,9 @@ def make_solver(jac_fn):
             k_store = k_store.at[:, 0, :].set(solve_stage(m_dense, lu, f1))
 
             u = y_step
-            for stage_idx, (use_u_base, state_coeffs, rhs_coeffs) in enumerate(_STAGE_SPECS, start=1):
+            for stage_idx, (use_u_base, state_coeffs, rhs_coeffs) in enumerate(
+                _STAGE_SPECS, start=1
+            ):
                 base = u if use_u_base else y_step
                 u = assemble_stage_state(base, state_coeffs)
                 f_stage = eval_f(m_dense, u)
@@ -212,8 +226,13 @@ def make_solver(jac_fn):
 
             y_new = jnp.where(accept[:, None], u_c, y_c)
             t_new = jnp.where(accept, t_c + dt_use, t_c)
-            reached = accept & (jnp.abs(t_new - next_target) <= 1e-12 * jnp.maximum(1.0, jnp.abs(next_target)))
-            slot_mask = jax.nn.one_hot(save_idx_c, n_save, dtype=jnp.bool_) & reached[:, None]
+            reached = accept & (
+                jnp.abs(t_new - next_target)
+                <= 1e-12 * jnp.maximum(1.0, jnp.abs(next_target))
+            )
+            slot_mask = (
+                jax.nn.one_hot(save_idx_c, n_save, dtype=jnp.bool_) & reached[:, None]
+            )
             hist_new = jnp.where(slot_mask[:, :, None], y_new[:, None, :], hist_c)
             save_idx_new = save_idx_c + reached.astype(jnp.int32)
 
@@ -241,14 +260,20 @@ def make_solver(jac_fn):
     ):
         times = np.asarray(t_span, dtype=np.float64)
         if times.ndim != 1:
-            raise ValueError(f"t_span must be a 1D array of save times, got shape {times.shape}")
+            raise ValueError(
+                f"t_span must be a 1D array of save times, got shape {times.shape}"
+            )
         if times.size < 2:
-            raise ValueError(f"t_span must contain at least 2 save times, got {times.size}")
+            raise ValueError(
+                f"t_span must contain at least 2 save times, got {times.size}"
+            )
         if not np.all(np.diff(times) > 0.0):
             raise ValueError("t_span must be strictly increasing")
 
         times_jnp = jnp.asarray(times, dtype=jnp.float64)
-        dt0 = float(first_step if first_step is not None else (times[-1] - times[0]) * 1e-6)
+        dt0 = float(
+            first_step if first_step is not None else (times[-1] - times[0]) * 1e-6
+        )
         y0 = jnp.asarray(y0_batch, dtype=jnp.float64)
         _, hist = _solve_impl(
             y0,
