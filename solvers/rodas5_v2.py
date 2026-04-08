@@ -100,7 +100,7 @@ def make_solver(
 
     # Build path-specific helpers at trace time (Python-level if/else).
     if jac_fn is not None:
-        # Linear path: dy/dt = J(params) @ y — no AD needed.
+        # Jacobian supplied directly: jac_fn(y, params) -> [n_vars, n_vars].
         _jac_fn_batched = jax.vmap(jac_fn)
 
     else:
@@ -200,14 +200,14 @@ def make_solver(
             save_idx_init = jnp.ones((bs,), dtype=jnp.int32)
 
             if jac_fn is not None:
-                jac = _jac_fn_batched(params_chunk)
-                jac_matvec = jac.astype(matvec_dtype)
-                jac_lu = jac.astype(lu_dtype)
 
                 def _step_batch(y, dt):
+                    jac = _jac_fn_batched(y, params_chunk)
+                    jac_lu = jac.astype(lu_dtype)
+
                     def f_eval(u):
                         out = _batched_matvec(
-                            jac_matvec,
+                            jac.astype(matvec_dtype),
                             u.astype(matvec_dtype),
                             precision=dot_precision,
                         )

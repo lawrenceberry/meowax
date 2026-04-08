@@ -105,8 +105,8 @@ def _make_nn_reaction_system(n_vars):
             tuple(s * M_np[i, j] for j in range(n_vars)) for i in range(n_vars)
         )
 
-    def jac_array(p):
-        """Jacobian as a JAX array, function of params only (linear systems)."""
+    def jac_array(y, p):
+        """Jacobian as a JAX array. For this linear system, independent of y."""
         s = p[0]
         return s * M
 
