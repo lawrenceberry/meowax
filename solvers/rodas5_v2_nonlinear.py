@@ -1,15 +1,14 @@
-"""Rodas5 solver — single-loop batched variant.
+"""Rodas5 solver — single-loop batched variant for nonlinear ODEs.
 
-Same Rodas5 math and float64 precision as rodas5.py, but the solver
-uses a single jax.lax.while_loop with the batch dimension inside the loop
+Solves dy/dt = f(y, params) using Rodas5 (order 5) with Jacobian computed
+via automatic differentiation at every step.
+
+Uses a single jax.lax.while_loop with the batch dimension inside the loop
 body instead of vmap-over-while-loop.
 
 The batch_size parameter controls how many trajectories share a while loop.
 batch_size=N (default) puts all trajectories in one loop; batch_size=1
 recovers the vmap-over-while-loop behaviour of rodas5.py.
-
-For linear systems dy/dt = J(p) y, pass jac_fn instead of f to avoid
-automatic differentiation entirely.
 """
 
 import functools
@@ -44,69 +43,39 @@ _C81 = 42.57076742291101;  _C82 = -13.80770672017997;  _C83 = 93.98938432427124;
 # fmt: on
 
 _SUPPORTED_LINEAR_SOLVER_PRECISIONS = ("fp64", "fp32")
-_MATVEC_DOT_PRECISION = lax.DotAlgorithmPreset.TF32_TF32_F32
-_BATCHED_DOT_DIMENSION_NUMBERS = (((2,), (1,)), ((0,), (0,)))
 
 
-def _batched_matvec(mat, vec, *, precision):
-    out = lax.dot(
-        mat,
-        vec[..., None],
-        dimension_numbers=_BATCHED_DOT_DIMENSION_NUMBERS,
-        precision=precision,
-    )
-    return out[..., 0]
+def make_solver(
+    f,
+    *,
+    linear_solver_precision="fp64",
+    batch_size=None,
+):
+    """Create a reusable Rodas5 ensemble solver for nonlinear ODEs.
 
-
-def _validate_solver_args(f, jac_fn, linear_solver_precision):
-    if (f is None) == (jac_fn is None):
-        raise ValueError("Exactly one of f or jac_fn must be provided")
+    Parameters
+    ----------
+    f : callable
+        ODE right-hand side with signature ``f(y, params) -> dy/dt``.
+    linear_solver_precision : str
+        Precision for LU factorization and solve: ``"fp64"`` or ``"fp32"``.
+    batch_size : int or None
+        Number of trajectories per while-loop chunk.  ``None`` (default)
+        puts all trajectories in a single loop.
+    """
     if linear_solver_precision not in _SUPPORTED_LINEAR_SOLVER_PRECISIONS:
         raise ValueError(
             "linear_solver_precision must be one of "
             f"{_SUPPORTED_LINEAR_SOLVER_PRECISIONS}, got {linear_solver_precision!r}"
         )
 
-
-def make_solver(
-    f=None,
-    *,
-    jac_fn=None,
-    linear_solver_precision="fp64",
-    batch_size=None,
-):
-    """Create a reusable Rodas5 ensemble solver.
-
-    The returned callable keeps the JIT-compiled solve graph alive across
-    invocations, which is especially important for benchmarking and repeated
-    solves with fixed problem structure.
-    """
-    _validate_solver_args(f, jac_fn, linear_solver_precision)
-
     lu_dtype = jnp.float32 if linear_solver_precision == "fp32" else jnp.float64
-    matvec_dtype = (
-        jnp.float32
-        if jac_fn is not None and linear_solver_precision == "fp32"
-        else jnp.float64
-    )
-    dot_precision = (
-        _MATVEC_DOT_PRECISION
-        if linear_solver_precision == "fp32" and jax.default_backend() != "cpu"
-        else lax.Precision.DEFAULT
-    )
 
     lu_factor_batched = jax.vmap(jax.scipy.linalg.lu_factor)
     lu_solve_batched = jax.vmap(jax.scipy.linalg.lu_solve)
 
-    # Build path-specific helpers at trace time (Python-level if/else).
-    if jac_fn is not None:
-        # Jacobian supplied directly: jac_fn(y, params) -> [n_vars, n_vars].
-        _jac_fn_batched = jax.vmap(jac_fn)
-
-    else:
-        # General path: f supplied, Jacobian via AD.
-        _f_batched = jax.vmap(f)
-        _jac_batched = jax.vmap(lambda y, p: jax.jacobian(lambda y_: f(y_, p))(y))
+    _f_batched = jax.vmap(f)
+    _jac_batched = jax.vmap(lambda y, p: jax.jacobian(lambda y_: f(y_, p))(y))
 
     @functools.partial(
         jax.jit,
@@ -199,32 +168,14 @@ def make_solver(
             dt_init = jnp.full((bs,), dt0, dtype=jnp.float64)
             save_idx_init = jnp.ones((bs,), dtype=jnp.int32)
 
-            if jac_fn is not None:
+            def _step_batch(y, dt):
+                jac = _jac_batched(y, params_chunk)
+                jac_lu = jac.astype(lu_dtype)
 
-                def _step_batch(y, dt):
-                    jac = _jac_fn_batched(y, params_chunk)
-                    jac_lu = jac.astype(lu_dtype)
+                def f_eval(u):
+                    return _f_batched(u, params_chunk)
 
-                    def f_eval(u):
-                        out = _batched_matvec(
-                            jac.astype(matvec_dtype),
-                            u.astype(matvec_dtype),
-                            precision=dot_precision,
-                        )
-                        return out.astype(jnp.float64)
-
-                    return _step_with_factored_system(y, dt, f_eval, jac_lu)
-
-            else:
-
-                def _step_batch(y, dt):
-                    jac = _jac_batched(y, params_chunk)
-                    jac_lu = jac.astype(lu_dtype)
-
-                    def f_eval(u):
-                        return _f_batched(u, params_chunk)
-
-                    return _step_with_factored_system(y, dt, f_eval, jac_lu)
+                return _step_with_factored_system(y, dt, f_eval, jac_lu)
 
             def cond_fn(state):
                 t, _, _, _, save_idx, n_steps = state
@@ -328,5 +279,3 @@ def make_solver(
         return results.reshape(n_padded, int(times.size), n_vars)[:N]
 
     return _solve
-
-
