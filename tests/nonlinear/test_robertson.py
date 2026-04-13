@@ -1,9 +1,6 @@
 """Tests for the Rodas5 nonlinear solver on the Robertson stiff ODE system."""
 
-import jax
-
-jax.config.update("jax_enable_x64", True)  # noqa: E402
-import jax.numpy as jnp  # isort: skip  # noqa: E402
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -27,11 +24,13 @@ def _make_robertson_system():
 
     def ode_fn(y, t, p):
         del t
-        return jnp.array([
-            -p[0] * y[0] + p[1] * y[1] * y[2],
-            p[0] * y[0] - p[1] * y[1] * y[2] - p[2] * y[1] ** 2,
-            p[2] * y[1] ** 2,
-        ])
+        return jnp.array(
+            [
+                -p[0] * y[0] + p[1] * y[1] * y[2],
+                p[0] * y[0] - p[1] * y[1] * y[2] - p[2] * y[1] ** 2,
+                p[2] * y[1] ** 2,
+            ]
+        )
 
     return {"n_vars": 3, "ode_fn": ode_fn, "y0": y0}
 
@@ -79,6 +78,4 @@ def test_rodas5_nonlinear(benchmark, ensemble_size, lu_precision):
             rtol=1e-8,
             atol=1e-10,
         ).block_until_ready()
-        np.testing.assert_allclose(
-            results_np, np.asarray(y_ref), rtol=2e-4, atol=3e-8
-        )
+        np.testing.assert_allclose(results_np, np.asarray(y_ref), rtol=2e-4, atol=3e-8)

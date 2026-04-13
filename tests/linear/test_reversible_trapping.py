@@ -37,10 +37,7 @@ steps. As with the heat-equation test, the stable benchmark path is to keep the
 matrix-vector products in fp64 and vary only the LU precision.
 """
 
-import jax
-
-jax.config.update("jax_enable_x64", True)  # noqa: E402
-import jax.numpy as jnp  # isort: skip  # noqa: E402
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -190,9 +187,7 @@ def test_rodas5_linear(
             rtol=1e-8,
             atol=1e-10,
         ).block_until_ready()
-        np.testing.assert_allclose(
-            results_np, np.asarray(y_ref), rtol=2e-4, atol=3e-8
-        )
+        np.testing.assert_allclose(results_np, np.asarray(y_ref), rtol=2e-4, atol=3e-8)
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +234,4 @@ def test_rodas5_nonlinear(
             rtol=1e-8,
             atol=1e-10,
         ).block_until_ready()
-        np.testing.assert_allclose(
-            results_np, np.asarray(y_ref), rtol=2e-4, atol=3e-8
-        )
+        np.testing.assert_allclose(results_np, np.asarray(y_ref), rtol=2e-4, atol=3e-8)

@@ -1,9 +1,6 @@
 """Unit tests for the Diffrax Kvaerno5 cached reference wrapper."""
 
-import jax
-
-jax.config.update("jax_enable_x64", True)  # noqa: E402
-import jax.numpy as jnp  # isort: skip  # noqa: E402
+import jax.numpy as jnp
 import numpy as np
 
 from tests.reference_solvers.python import diffrax_kvaerno5

@@ -25,10 +25,7 @@ Parameter perturbations are ±5% around ρ = 28.  All values land in [26.6, 29.4
 well above the chaos onset, so every ensemble member is fully chaotic.
 """
 
-import jax
-
-jax.config.update("jax_enable_x64", True)  # noqa: E402
-import jax.numpy as jnp  # isort: skip  # noqa: E402
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -41,7 +38,7 @@ _ENSEMBLE_SIZES = [2, 100, 1000, 10000]
 # Conservative attractor bounds for ρ ∈ [26.6, 29.4]
 _X_MAX = 40.0
 _Y_MAX = 40.0
-_Z_MIN = -1.0   # z stays non-negative; small slack for numerical noise
+_Z_MIN = -1.0  # z stays non-negative; small slack for numerical noise
 _Z_MAX = 65.0
 
 
@@ -54,11 +51,13 @@ def _make_lorenz_system():
         sigma = 10.0
         beta = 8.0 / 3.0
         rho = p[0]
-        return jnp.array([
-            sigma * (y[1] - y[0]),
-            y[0] * (rho - y[2]) - y[1],
-            y[0] * y[1] - beta * y[2],
-        ])
+        return jnp.array(
+            [
+                sigma * (y[1] - y[0]),
+                y[0] * (rho - y[2]) - y[1],
+                y[0] * y[1] - beta * y[2],
+            ]
+        )
 
     return {"n_vars": 3, "ode_fn": ode_fn, "y0": y0}
 
@@ -75,8 +74,12 @@ def _make_params_batch(size, seed):
 def _assert_on_attractor(states):
     """Assert that states lie within the known Lorenz attractor bounds for ρ ≈ 28."""
     x, y, z = states[:, 0], states[:, 1], states[:, 2]
-    assert np.all(np.abs(x) < _X_MAX), f"x left attractor: max |x| = {np.abs(x).max():.2f}"
-    assert np.all(np.abs(y) < _Y_MAX), f"y left attractor: max |y| = {np.abs(y).max():.2f}"
+    assert np.all(np.abs(x) < _X_MAX), (
+        f"x left attractor: max |x| = {np.abs(x).max():.2f}"
+    )
+    assert np.all(np.abs(y) < _Y_MAX), (
+        f"y left attractor: max |y| = {np.abs(y).max():.2f}"
+    )
     assert np.all(z > _Z_MIN), f"z below attractor: min z = {z.min():.2f}"
     assert np.all(z < _Z_MAX), f"z above attractor: max z = {z.max():.2f}"
 

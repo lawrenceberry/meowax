@@ -1,9 +1,6 @@
 """Tests for the Rodas5 nonlinear solver on coupled van der Pol oscillator systems."""
 
-import jax
-
-jax.config.update("jax_enable_x64", True)  # noqa: E402
-import jax.numpy as jnp  # isort: skip  # noqa: E402
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -13,8 +10,8 @@ from tests.reference_solvers.python.diffrax_kvaerno5 import (
 )
 
 _TIMES = jnp.array((0.0, 0.25, 0.5, 0.75, 1.0), dtype=jnp.float64)
-_OSC_PAIRS = [15, 25, 35]   # oscillator pairs → 30D, 50D, 70D
-_MU_SCALES = [1, 10, 100]   # mu_max: stiffness scales as mu²
+_OSC_PAIRS = [15, 25, 35]  # oscillator pairs → 30D, 50D, 70D
+_MU_SCALES = [1, 10, 100]  # mu_max: stiffness scales as mu²
 _ENSEMBLE_SIZES = [2, 100, 1000, 10000]
 _REFERENCE_ENSEMBLE_SIZES = [2]
 
@@ -57,7 +54,13 @@ def _make_vdp_system(n_osc, mu_max):
         v = y[1::2]
         return jnp.stack([v, s * mu * (1.0 - x * x) * v - omega**2 * x], axis=1).ravel()
 
-    return {"n_osc": n_osc, "mu_max": mu_max, "n_vars": n_vars, "ode_fn": ode_fn, "y0": y0}
+    return {
+        "n_osc": n_osc,
+        "mu_max": mu_max,
+        "n_vars": n_vars,
+        "ode_fn": ode_fn,
+        "y0": y0,
+    }
 
 
 @pytest.fixture
@@ -115,6 +118,4 @@ def test_rodas5_nonlinear(benchmark, vdp_system, ensemble_size, lu_precision):
             rtol=1e-8,
             atol=1e-10,
         ).block_until_ready()
-        np.testing.assert_allclose(
-            results_np, np.asarray(y_ref), rtol=2e-4, atol=3e-8
-        )
+        np.testing.assert_allclose(results_np, np.asarray(y_ref), rtol=2e-4, atol=3e-8)

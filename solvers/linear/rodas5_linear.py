@@ -16,11 +16,9 @@ import functools
 from typing import Literal
 
 import jax
+import jax.numpy as jnp
 import numpy as np
-
-jax.config.update("jax_enable_x64", True)  # noqa: E402 - must precede jax.numpy import
-from jax import lax  # isort: skip  # noqa: E402
-import jax.numpy as jnp  # isort: skip  # noqa: E402
+from jax import lax
 
 # fmt: off
 # Rodas5 W-transformed coefficients

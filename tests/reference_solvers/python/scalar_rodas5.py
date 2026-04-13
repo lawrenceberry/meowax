@@ -6,10 +6,8 @@ W-transformed variant from Di Marzo (1993) and DISCO-EB (Hahn).
 import functools
 
 import jax
+import jax.numpy as jnp
 import numpy as np
-
-jax.config.update("jax_enable_x64", True)  # noqa: E402 - must precede jax.numpy import
-import jax.numpy as jnp  # isort: skip  # noqa: E402
 
 # fmt: off
 # Rodas5 W-transformed coefficients

@@ -26,10 +26,7 @@ shared symmetrically, and the resulting Jacobian has zero column sum. The tests
 therefore verify conservation of total discrete mass.
 """
 
-import jax
-
-jax.config.update("jax_enable_x64", True)  # noqa: E402
-import jax.numpy as jnp  # isort: skip  # noqa: E402
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -74,14 +71,16 @@ def _make_moving_diffusion_spike_system(n_vars):
     y0 /= y0.sum()
     y0 = jnp.array(y0, dtype=jnp.float64)
 
-    background_faces = jnp.full((n_vars + 1,), _BACKGROUND_DIFFUSIVITY, dtype=jnp.float64)
+    background_faces = jnp.full(
+        (n_vars + 1,), _BACKGROUND_DIFFUSIVITY, dtype=jnp.float64
+    )
     background_faces = background_faces.at[0].set(0.0).at[-1].set(0.0)
     background_matrix = _matrix_from_face_diffusivity(background_faces, dx)
-    spatial_profile = jnp.exp(-((x_faces - _SPIKE_CENTER) / _SPIKE_WIDTH) ** 2)
+    spatial_profile = jnp.exp(-(((x_faces - _SPIKE_CENTER) / _SPIKE_WIDTH) ** 2))
     spatial_profile = spatial_profile.at[0].set(0.0).at[-1].set(0.0)
 
     def _spike_faces(t, p):
-        pulse = p[0] * jnp.exp(-((t - _SPIKE_TIME_CENTER) / _SPIKE_TIME_WIDTH) ** 2)
+        pulse = p[0] * jnp.exp(-(((t - _SPIKE_TIME_CENTER) / _SPIKE_TIME_WIDTH) ** 2))
         return _SPIKE_DIFFUSIVITY * pulse * spatial_profile
 
     def jac_nonstiff_fn(t, p):

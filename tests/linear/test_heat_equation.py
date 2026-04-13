@@ -33,10 +33,7 @@ keep mv_precision="fp64" and vary only lu_precision, which is why the benchmark 
 parameterised on lu_precision alone.
 """
 
-import jax
-
-jax.config.update("jax_enable_x64", True)  # noqa: E402
-import jax.numpy as jnp  # isort: skip  # noqa: E402
+import jax.numpy as jnp
 import numpy as np
 import pytest
 

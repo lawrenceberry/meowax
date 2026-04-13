@@ -11,10 +11,8 @@ from pathlib import Path
 
 import diffrax
 import jax
+import jax.numpy as jnp
 import numpy as np
-
-jax.config.update("jax_enable_x64", True)  # noqa: E402 - must precede jax.numpy import
-import jax.numpy as jnp  # isort: skip  # noqa: E402
 
 _CACHE_ROOT = (
     Path(__file__).resolve().parents[3]

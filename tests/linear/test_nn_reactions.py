@@ -6,10 +6,7 @@ NN reactions — stiffness from rate constant heterogeneity
 M is tridiagonal with entries that span 8 orders of magnitude. kf goes from 1e-2 to 1e6 and kb goes from 1e6 to 1e-2 across the chain, so diagonal entries like -(kb[i-1] + kf[i]) vary wildly. The stiffness ratio (largest / smallest |eigenvalue|) is roughly 10⁸ — fixed regardless of N. Adding more variables doesn't make the problem harder; the matrix just gets larger but equally stiff.
 """
 
-import jax
-
-jax.config.update("jax_enable_x64", True)  # noqa: E402
-import jax.numpy as jnp  # isort: skip  # noqa: E402
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -125,9 +122,7 @@ def test_rodas5_linear(benchmark, nn_reaction_system, ensemble_size, lu_precisio
             rtol=1e-8,
             atol=1e-10,
         ).block_until_ready()
-        np.testing.assert_allclose(
-            results_np, np.asarray(y_ref), rtol=2e-4, atol=3e-8
-        )
+        np.testing.assert_allclose(results_np, np.asarray(y_ref), rtol=2e-4, atol=3e-8)
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +165,4 @@ def test_rodas5_nonlinear(benchmark, nn_reaction_system, ensemble_size, lu_preci
             rtol=1e-8,
             atol=1e-10,
         ).block_until_ready()
-        np.testing.assert_allclose(
-            results_np, np.asarray(y_ref), rtol=2e-4, atol=3e-8
-        )
+        np.testing.assert_allclose(results_np, np.asarray(y_ref), rtol=2e-4, atol=3e-8)
