@@ -1,22 +1,15 @@
-"""Rodas5 solver — single-loop batched variant supporting linear and nonlinear ODEs.
+"""Rodas5 solver — linear ODE variant (jac_fn path).
 
-Two usage modes selected via mutually exclusive keyword arguments:
-
-* **jac_fn** (linear mode): supply ``jac_fn(t, params) -> [n_vars, n_vars]``.
-  The Jacobian depends on time and parameters but NOT on the current state y.
-  f_eval is computed as a matrix-vector product using the supplied Jacobian.
-
-* **ode_fn** (nonlinear mode): supply ``ode_fn(y, t, params) -> dy/dt``.
-  The Jacobian is recomputed at every step via ``jax.jacfwd``.
-
-Exactly one of ``ode_fn`` or ``jac_fn`` must be provided.
+Accepts a ``jac_fn(t, params) -> [n_vars, n_vars]`` whose Jacobian depends on
+time and parameters but NOT on the current state y.  f_eval is computed as a
+matrix-vector product using the supplied Jacobian.
 
 Uses a single jax.lax.while_loop with the batch dimension inside the loop
 body instead of vmap-over-while-loop.
 
 The batch_size parameter controls how many trajectories share a while loop.
 batch_size=N (default) puts all trajectories in one loop; batch_size=1
-recovers the vmap-over-while-loop behaviour of scalar_rodas5.py.
+recovers the vmap-over-while-loop behaviour.
 """
 
 import functools
@@ -64,48 +57,34 @@ def _batched_matvec(mat, vec, *, precision):
 
 
 def make_solver(
-    ode_fn=None,
-    jac_fn=None,
+    jac_fn,
     lu_precision: Literal["fp32", "fp64"] = "fp64",
     mv_precision: Literal["fp32", "fp64"] = "fp64",
     batch_size=None,
 ):
-    """Create a reusable Rodas5 ensemble solver for linear or nonlinear ODEs.
+    """Create a reusable Rodas5 ensemble solver for linear ODEs.
 
     Parameters
     ----------
-    ode_fn : callable, optional
-        ODE right-hand side with signature ``ode_fn(y, t, params) -> dy/dt``.
-        The Jacobian is recomputed at every step via ``jax.jacfwd``.
-        Mutually exclusive with ``jac_fn``.
-    jac_fn : callable, optional
+    jac_fn : callable
         Jacobian function with signature ``jac_fn(t, params) -> [n_vars, n_vars]``.
         The Jacobian may depend on time and parameters but must not depend on
         the current state y.  f_eval is implemented as a matrix-vector product.
-        Mutually exclusive with ``ode_fn``.
     lu_precision :
-        Precision for LU factorization, LU solve, and matrix-vector products:
-        ``"fp64"`` or ``"fp32"``.
+        Precision for LU factorization and LU solve: ``"fp32"`` or ``"fp64"``.
+    mv_precision :
+        Precision for matrix-vector products: ``"fp32"`` or ``"fp64"``.
     batch_size : int or None
         Number of trajectories per while-loop batch.  ``None`` (default)
         puts all trajectories in a single loop.
     """
-    if (ode_fn is None) == (jac_fn is None):
-        raise ValueError("Exactly one of ode_fn or jac_fn must be provided")
-
     lu_dtype = jnp.float32 if lu_precision == "fp32" else jnp.float64
     mv_dtype = jnp.float32 if mv_precision == "fp32" else jnp.float64
 
     lu_factor_batched = jax.vmap(jax.scipy.linalg.lu_factor)
     lu_solve_batched = jax.vmap(jax.scipy.linalg.lu_solve)
 
-    if ode_fn is not None:
-        _ode_batched = jax.vmap(ode_fn)
-        _jac_batched = jax.vmap(
-            lambda y, t, p: jax.jacfwd(lambda y_: ode_fn(y_, t, p))(y)
-        )
-    else:
-        _jac_batched = jax.vmap(lambda _, t, p: jac_fn(t, p), in_axes=(0, 0, 0))
+    _jac_batched = jax.vmap(lambda _, t, p: jac_fn(t, p), in_axes=(0, 0, 0))
 
     @functools.partial(
         jax.jit,
@@ -138,21 +117,15 @@ def make_solver(
                 lu = lu_factor_batched(dtgamma_inv * eye - jac_lu)
                 inv_dt = (1.0 / dt)[:, None]
 
-                if ode_fn is not None:
-
-                    def f_eval(u):
-                        return _ode_batched(u, t, params_batch)
-                else:
-
-                    def f_eval(u):
-                        out = _batched_matvec(
-                            jac_mv,
-                            u.astype(mv_dtype),
-                            precision=lax.DotAlgorithmPreset.TF32_TF32_F32
-                            if mv_precision == "fp32" and jax.default_backend() != "cpu"
-                            else lax.Precision.DEFAULT,
-                        )
-                        return out.astype(jnp.float64)
+                def f_eval(u):
+                    out = _batched_matvec(
+                        jac_mv,
+                        u.astype(mv_dtype),
+                        precision=lax.DotAlgorithmPreset.TF32_TF32_F32
+                        if mv_precision == "fp32" and jax.default_backend() != "cpu"
+                        else lax.Precision.DEFAULT,
+                    )
+                    return out.astype(jnp.float64)
 
                 def lu_solve(rhs):
                     sol = lu_solve_batched(lu, rhs.astype(lu_dtype))

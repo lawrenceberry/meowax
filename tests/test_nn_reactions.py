@@ -1,4 +1,4 @@
-"""Tests for synthetic stiff nearest-neighbor mass-conserving ODE systems."""
+"""Tests for the Rodas5 linear and nonlinear solvers on nearest-neighbor reaction systems."""
 
 import jax
 
@@ -7,7 +7,8 @@ import jax.numpy as jnp  # isort: skip  # noqa: E402
 import numpy as np
 import pytest
 
-from solvers.rodas5 import make_solver as make_rodas5_solver
+from solvers.linear.rodas5_linear import make_solver as make_rodas5_linear
+from solvers.nonlinear.rodas5_nonlinear import make_solver as make_rodas5_nonlinear
 from tests.reference_solvers.python.diffrax_kvaerno5 import (
     make_solver as make_kvaerno5_solver,
 )
@@ -78,26 +79,21 @@ def nn_reaction_system(request):
     return _make_nn_reaction_system(request.param)
 
 
-def _make_solver(system, path, precision):
-    if path == "ode_fn":
-        return make_rodas5_solver(
-            ode_fn=system["ode_fn"], lu_precision=precision, mv_precision=precision
-        )
-    else:
-        return make_rodas5_solver(
-            jac_fn=system["jac_fn"], lu_precision=precision, mv_precision=precision
-        )
+# ---------------------------------------------------------------------------
+# Linear solver (jac_fn path)
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("nn_reaction_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id)
 @pytest.mark.parametrize("ensemble_size", _ENSEMBLE_SIZES)
-@pytest.mark.parametrize("path", ["ode_fn", "jac_fn"])
 @pytest.mark.parametrize("precision", ["fp32", "fp64"])
-def test_rodas5(benchmark, nn_reaction_system, ensemble_size, path, precision):
-    """Rodas5 ensemble benchmark parameterised by dim, size, path, and precision."""
+def test_rodas5_linear(benchmark, nn_reaction_system, ensemble_size, precision):
+    """Rodas5 linear (jac_fn) ensemble benchmark parameterised by dim, size, and precision."""
     system = nn_reaction_system
     params = _make_params_batch(ensemble_size, seed=42)
-    solve = _make_solver(system, path, precision)
+    solve = make_rodas5_linear(
+        jac_fn=system["jac_fn"], lu_precision=precision, mv_precision=precision
+    )
     results = benchmark.pedantic(
         lambda: solve(
             y0=system["y0"],
@@ -117,13 +113,77 @@ def test_rodas5(benchmark, nn_reaction_system, ensemble_size, path, precision):
 
 @pytest.mark.parametrize("nn_reaction_system", [70], indirect=True, ids=_dim_id)
 @pytest.mark.parametrize("ensemble_size", [2])
-@pytest.mark.parametrize("path", ["ode_fn", "jac_fn"])
 @pytest.mark.parametrize("precision", ["fp32"])
-def test_rodas5_matches_reference(nn_reaction_system, ensemble_size, path, precision):
-    """Validate rodas5 against Kvaerno5 (diffrax) on a 70D system, N=2, fp32."""
+def test_rodas5_linear_matches_reference(nn_reaction_system, ensemble_size, precision):
+    """Validate rodas5 linear against Kvaerno5 (diffrax) on a 70D system, N=2, fp32."""
     system = nn_reaction_system
     params = _make_params_batch(ensemble_size, seed=42)
-    solve = _make_solver(system, path, precision)
+    solve = make_rodas5_linear(
+        jac_fn=system["jac_fn"], lu_precision=precision, mv_precision=precision
+    )
+    solve_ref = make_kvaerno5_solver(system["ode_fn"])
+
+    y = solve(
+        y0=system["y0"],
+        t_span=_MULTI_SAVE_TIMES,
+        params=params,
+        first_step=1e-6,
+        rtol=1e-6,
+        atol=1e-8,
+    ).block_until_ready()
+
+    y_ref = solve_ref(
+        y0=system["y0"],
+        t_span=_MULTI_SAVE_TIMES,
+        params=params,
+        first_step=1e-6,
+        rtol=1e-8,
+        atol=1e-10,
+    ).block_until_ready()
+
+    assert y.shape == (2, len(_MULTI_SAVE_TIMES), 70)
+    np.testing.assert_allclose(y.sum(axis=2), 1.0, atol=3e-6)
+    np.testing.assert_allclose(np.asarray(y), np.asarray(y_ref), rtol=2e-4, atol=3e-8)
+
+
+# ---------------------------------------------------------------------------
+# Nonlinear solver (ode_fn path)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("nn_reaction_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id)
+@pytest.mark.parametrize("ensemble_size", _ENSEMBLE_SIZES)
+@pytest.mark.parametrize("precision", ["fp32", "fp64"])
+def test_rodas5_nonlinear(benchmark, nn_reaction_system, ensemble_size, precision):
+    """Rodas5 nonlinear (ode_fn) ensemble benchmark parameterised by dim, size, and precision."""
+    system = nn_reaction_system
+    params = _make_params_batch(ensemble_size, seed=42)
+    solve = make_rodas5_nonlinear(ode_fn=system["ode_fn"], lu_precision=precision)
+    results = benchmark.pedantic(
+        lambda: solve(
+            y0=system["y0"],
+            t_span=_T_SPAN,
+            params=params,
+            first_step=1e-6,
+            rtol=1e-6,
+            atol=1e-8,
+        ).block_until_ready(),
+        warmup_rounds=1,
+        rounds=1,
+    )
+
+    assert results.shape == (ensemble_size, len(_T_SPAN), system["n_vars"])
+    np.testing.assert_allclose(results.sum(axis=2), 1.0, atol=3e-6)
+
+
+@pytest.mark.parametrize("nn_reaction_system", [70], indirect=True, ids=_dim_id)
+@pytest.mark.parametrize("ensemble_size", [2])
+@pytest.mark.parametrize("precision", ["fp32"])
+def test_rodas5_nonlinear_matches_reference(nn_reaction_system, ensemble_size, precision):
+    """Validate rodas5 nonlinear against Kvaerno5 (diffrax) on a 70D system, N=2, fp32."""
+    system = nn_reaction_system
+    params = _make_params_batch(ensemble_size, seed=42)
+    solve = make_rodas5_nonlinear(ode_fn=system["ode_fn"], lu_precision=precision)
     solve_ref = make_kvaerno5_solver(system["ode_fn"])
 
     y = solve(
