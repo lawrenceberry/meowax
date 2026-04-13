@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local cached reference solver outputs
+.cached_reference_outputs/

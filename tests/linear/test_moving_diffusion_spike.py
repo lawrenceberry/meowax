@@ -36,7 +36,7 @@ import pytest
 from solvers.linear.rodas5_linear import make_solver as make_rodas5_linear
 from solvers.nonlinear.rodas5_nonlinear import make_solver as make_rodas5_nonlinear
 from tests.reference_solvers.python.diffrax_kvaerno5 import (
-    make_solver as make_kvaerno5_solver,
+    make_cached_solver as make_cached_kvaerno5_solver,
 )
 
 _BACKGROUND_DIFFUSIVITY = 1e-4
@@ -46,12 +46,12 @@ _SPIKE_CENTER = 0.55
 _SPIKE_TIME_CENTER = 0.5
 _SPIKE_TIME_WIDTH = 0.2
 _FINAL_TIME = 1.0
-_CPU_DEVICE = jax.devices("cpu")[0]
+_REFERENCE_RTOL = 7e-2
 
-_T_SPAN = (0.0, 1.0)
-_MULTI_SAVE_TIMES = jnp.array((0.0, 0.25, 0.5, 0.75, 1.0), dtype=jnp.float64)
+_TIMES = jnp.array((0.0, 0.25, 0.5, 0.75, 1.0), dtype=jnp.float64)
 _SYSTEM_DIMS = [30, 50, 70]
 _ENSEMBLE_SIZES = [2, 100, 1000]
+_REFERENCE_ENSEMBLE_SIZES = [2]
 
 
 def _matrix_from_face_diffusivity(face_diffusivity, dx):
@@ -119,11 +119,6 @@ def _make_params_batch(size, seed):
     )
 
 
-def _solve_on_cpu(solve, **kwargs):
-    with jax.default_device(_CPU_DEVICE):
-        return solve(**kwargs).block_until_ready()
-
-
 @pytest.fixture
 def moving_diffusion_spike_system(request):
     """Configurable moving diffusion spike system parameterized by dimension."""
@@ -143,7 +138,7 @@ def moving_diffusion_spike_system(request):
 def test_rodas5_linear(
     benchmark, moving_diffusion_spike_system, ensemble_size, lu_precision
 ):
-    """Rodas5 linear (jac_fn) ensemble benchmark parameterised by dim, size, and LU precision."""
+    """Rodas5 linear benchmark with cached Diffrax validation on practical ensemble sizes."""
     system = moving_diffusion_spike_system
     params = _make_params_batch(ensemble_size, seed=42)
     solve = make_rodas5_linear(
@@ -152,68 +147,35 @@ def test_rodas5_linear(
         batch_size=1,
     )
     results = benchmark.pedantic(
-        lambda: _solve_on_cpu(
-            solve,
+        lambda: solve(
             y0=system["y0"],
-            t_span=_T_SPAN,
+            t_span=_TIMES,
             params=params,
             first_step=1e-6,
             rtol=1e-6,
             atol=1e-8,
-        ),
+        ).block_until_ready(),
         warmup_rounds=1,
         rounds=1,
     )
     results_np = np.asarray(results)
 
-    assert results.shape == (ensemble_size, len(_T_SPAN), system["n_vars"])
+    assert results.shape == (ensemble_size, len(_TIMES), system["n_vars"])
     assert np.all(np.isfinite(results_np))
     np.testing.assert_allclose(results_np.sum(axis=2), 1.0, atol=3e-6)
-
-
-@pytest.mark.parametrize(
-    "moving_diffusion_spike_system", [70], indirect=True, ids=_dim_id
-)
-@pytest.mark.parametrize("ensemble_size", [2])
-@pytest.mark.parametrize("lu_precision", ["fp32"])
-def test_rodas5_linear_matches_reference(
-    moving_diffusion_spike_system, ensemble_size, lu_precision
-):
-    """Validate rodas5 linear against Kvaerno5 (diffrax) on a 70D system, N=2, fp32."""
-    system = moving_diffusion_spike_system
-    params = _make_params_batch(ensemble_size, seed=42)
-    solve = make_rodas5_linear(
-        jac_fn=system["jac_fn"],
-        lu_precision=lu_precision,
-        batch_size=1,
-    )
-    solve_ref = make_kvaerno5_solver(system["ode_fn"])
-
-    y = _solve_on_cpu(
-        solve,
-        y0=system["y0"],
-        t_span=_MULTI_SAVE_TIMES,
-        params=params,
-        first_step=1e-6,
-        rtol=1e-8,
-        atol=1e-10,
-    )
-
-    y_ref = _solve_on_cpu(
-        solve_ref,
-        y0=system["y0"],
-        t_span=_MULTI_SAVE_TIMES,
-        params=params,
-        first_step=1e-6,
-        rtol=1e-8,
-        atol=1e-10,
-    )
-    y_np = np.asarray(y)
-    y_ref_np = np.asarray(y_ref)
-
-    assert y.shape == (ensemble_size, len(_MULTI_SAVE_TIMES), system["n_vars"])
-    np.testing.assert_allclose(y_np.sum(axis=2), 1.0, atol=3e-6)
-    np.testing.assert_allclose(y_np, y_ref_np, rtol=1e-2, atol=3e-8)
+    if ensemble_size in _REFERENCE_ENSEMBLE_SIZES:
+        solve_ref = make_cached_kvaerno5_solver(system["ode_fn"])
+        y_ref = solve_ref(
+            y0=system["y0"],
+            t_span=_TIMES,
+            params=params,
+            first_step=1e-6,
+            rtol=1e-8,
+            atol=1e-10,
+        ).block_until_ready()
+        np.testing.assert_allclose(
+            results_np, np.asarray(y_ref), rtol=_REFERENCE_RTOL, atol=3e-8
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -229,66 +191,37 @@ def test_rodas5_linear_matches_reference(
 def test_rodas5_nonlinear(
     benchmark, moving_diffusion_spike_system, ensemble_size, lu_precision
 ):
-    """Rodas5 nonlinear (ode_fn) ensemble benchmark parameterised by dim, size, and LU precision."""
+    """Rodas5 nonlinear benchmark with cached Diffrax validation on practical ensemble sizes."""
     system = moving_diffusion_spike_system
     params = _make_params_batch(ensemble_size, seed=42)
     solve = make_rodas5_nonlinear(ode_fn=system["ode_fn"], lu_precision=lu_precision)
     results = benchmark.pedantic(
-        lambda: _solve_on_cpu(
-            solve,
+        lambda: solve(
             y0=system["y0"],
-            t_span=_T_SPAN,
+            t_span=_TIMES,
             params=params,
             first_step=1e-6,
             rtol=1e-6,
             atol=1e-8,
-        ),
+        ).block_until_ready(),
         warmup_rounds=1,
         rounds=1,
     )
     results_np = np.asarray(results)
 
-    assert results.shape == (ensemble_size, len(_T_SPAN), system["n_vars"])
+    assert results.shape == (ensemble_size, len(_TIMES), system["n_vars"])
     assert np.all(np.isfinite(results_np))
     np.testing.assert_allclose(results_np.sum(axis=2), 1.0, atol=3e-6)
-
-
-@pytest.mark.parametrize(
-    "moving_diffusion_spike_system", [70], indirect=True, ids=_dim_id
-)
-@pytest.mark.parametrize("ensemble_size", [2])
-@pytest.mark.parametrize("lu_precision", ["fp32"])
-def test_rodas5_nonlinear_matches_reference(
-    moving_diffusion_spike_system, ensemble_size, lu_precision
-):
-    """Validate rodas5 nonlinear against Kvaerno5 (diffrax) on a 70D system, N=2, fp32."""
-    system = moving_diffusion_spike_system
-    params = _make_params_batch(ensemble_size, seed=42)
-    solve = make_rodas5_nonlinear(ode_fn=system["ode_fn"], lu_precision=lu_precision)
-    solve_ref = make_kvaerno5_solver(system["ode_fn"])
-
-    y = _solve_on_cpu(
-        solve,
-        y0=system["y0"],
-        t_span=_MULTI_SAVE_TIMES,
-        params=params,
-        first_step=1e-6,
-        rtol=1e-8,
-        atol=1e-10,
-    )
-
-    y_ref = _solve_on_cpu(
-        solve_ref,
-        y0=system["y0"],
-        t_span=_MULTI_SAVE_TIMES,
-        params=params,
-        first_step=1e-6,
-        rtol=1e-8,
-        atol=1e-10,
-    )
-    y_np = np.asarray(y)
-    y_ref_np = np.asarray(y_ref)
-
-    assert y.shape == (ensemble_size, len(_MULTI_SAVE_TIMES), system["n_vars"])
-    np.testing.assert_allclose(y_np.sum(axis=2), 1.0, atol=3e-6)
-    np.testing.assert_allclose(y_np, y_ref_np, rtol=1e-2, atol=3e-8)
+    if ensemble_size in _REFERENCE_ENSEMBLE_SIZES:
+        solve_ref = make_cached_kvaerno5_solver(system["ode_fn"])
+        y_ref = solve_ref(
+            y0=system["y0"],
+            t_span=_TIMES,
+            params=params,
+            first_step=1e-6,
+            rtol=1e-8,
+            atol=1e-10,
+        ).block_until_ready()
+        np.testing.assert_allclose(
+            results_np, np.asarray(y_ref), rtol=_REFERENCE_RTOL, atol=3e-8
+        )

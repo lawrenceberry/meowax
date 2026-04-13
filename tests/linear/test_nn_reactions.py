@@ -16,13 +16,13 @@ import pytest
 from solvers.linear.rodas5_linear import make_solver as make_rodas5_linear
 from solvers.nonlinear.rodas5_nonlinear import make_solver as make_rodas5_nonlinear
 from tests.reference_solvers.python.diffrax_kvaerno5 import (
-    make_solver as make_kvaerno5_solver,
+    make_cached_solver as make_cached_kvaerno5_solver,
 )
 
-_T_SPAN = (0.0, 1.0)
-_MULTI_SAVE_TIMES = jnp.array((0.0, 0.125, 0.25, 0.5, 1.0), dtype=jnp.float64)
+_TIMES = jnp.array((0.0, 0.125, 0.25, 0.5, 1.0), dtype=jnp.float64)
 _SYSTEM_DIMS = [30, 50, 70]
 _ENSEMBLE_SIZES = [2, 100, 1000, 10000, 100_000]
+_REFERENCE_ENSEMBLE_SIZES = [2]
 
 
 def _make_nn_reaction_system(n_vars):
@@ -94,14 +94,14 @@ def nn_reaction_system(request):
 @pytest.mark.parametrize("ensemble_size", _ENSEMBLE_SIZES)
 @pytest.mark.parametrize("lu_precision", ["fp32", "fp64"])
 def test_rodas5_linear(benchmark, nn_reaction_system, ensemble_size, lu_precision):
-    """Rodas5 linear (jac_fn) ensemble benchmark parameterised by dim, size, and LU precision."""
+    """Rodas5 linear benchmark with cached Diffrax validation on practical ensemble sizes."""
     system = nn_reaction_system
     params = _make_params_batch(ensemble_size, seed=42)
     solve = make_rodas5_linear(jac_fn=system["jac_fn"], lu_precision=lu_precision)
     results = benchmark.pedantic(
         lambda: solve(
             y0=system["y0"],
-            t_span=_T_SPAN,
+            t_span=_TIMES,
             params=params,
             first_step=1e-6,
             rtol=1e-6,
@@ -110,44 +110,24 @@ def test_rodas5_linear(benchmark, nn_reaction_system, ensemble_size, lu_precisio
         warmup_rounds=1,
         rounds=1,
     )
+    results_np = np.asarray(results)
 
-    assert results.shape == (ensemble_size, len(_T_SPAN), system["n_vars"])
-    np.testing.assert_allclose(results.sum(axis=2), 1.0, atol=3e-6)
+    assert results.shape == (ensemble_size, len(_TIMES), system["n_vars"])
+    np.testing.assert_allclose(results_np.sum(axis=2), 1.0, atol=3e-6)
 
-
-@pytest.mark.parametrize("nn_reaction_system", [70], indirect=True, ids=_dim_id)
-@pytest.mark.parametrize("ensemble_size", [2])
-@pytest.mark.parametrize("lu_precision", ["fp32"])
-def test_rodas5_linear_matches_reference(
-    nn_reaction_system, ensemble_size, lu_precision
-):
-    """Validate rodas5 linear against Kvaerno5 (diffrax) on a 70D system, N=2, fp32."""
-    system = nn_reaction_system
-    params = _make_params_batch(ensemble_size, seed=42)
-    solve = make_rodas5_linear(jac_fn=system["jac_fn"], lu_precision=lu_precision)
-    solve_ref = make_kvaerno5_solver(system["ode_fn"])
-
-    y = solve(
-        y0=system["y0"],
-        t_span=_MULTI_SAVE_TIMES,
-        params=params,
-        first_step=1e-6,
-        rtol=1e-6,
-        atol=1e-8,
-    ).block_until_ready()
-
-    y_ref = solve_ref(
-        y0=system["y0"],
-        t_span=_MULTI_SAVE_TIMES,
-        params=params,
-        first_step=1e-6,
-        rtol=1e-8,
-        atol=1e-10,
-    ).block_until_ready()
-
-    assert y.shape == (2, len(_MULTI_SAVE_TIMES), 70)
-    np.testing.assert_allclose(y.sum(axis=2), 1.0, atol=3e-6)
-    np.testing.assert_allclose(np.asarray(y), np.asarray(y_ref), rtol=2e-4, atol=3e-8)
+    if ensemble_size in _REFERENCE_ENSEMBLE_SIZES:
+        solve_ref = make_cached_kvaerno5_solver(system["ode_fn"])
+        y_ref = solve_ref(
+            y0=system["y0"],
+            t_span=_TIMES,
+            params=params,
+            first_step=1e-6,
+            rtol=1e-8,
+            atol=1e-10,
+        ).block_until_ready()
+        np.testing.assert_allclose(
+            results_np, np.asarray(y_ref), rtol=2e-4, atol=3e-8
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -159,14 +139,14 @@ def test_rodas5_linear_matches_reference(
 @pytest.mark.parametrize("ensemble_size", _ENSEMBLE_SIZES)
 @pytest.mark.parametrize("lu_precision", ["fp32", "fp64"])
 def test_rodas5_nonlinear(benchmark, nn_reaction_system, ensemble_size, lu_precision):
-    """Rodas5 nonlinear (ode_fn) ensemble benchmark parameterised by dim, size, and LU precision."""
+    """Rodas5 nonlinear benchmark with cached Diffrax validation on practical ensemble sizes."""
     system = nn_reaction_system
     params = _make_params_batch(ensemble_size, seed=42)
     solve = make_rodas5_nonlinear(ode_fn=system["ode_fn"], lu_precision=lu_precision)
     results = benchmark.pedantic(
         lambda: solve(
             y0=system["y0"],
-            t_span=_T_SPAN,
+            t_span=_TIMES,
             params=params,
             first_step=1e-6,
             rtol=1e-6,
@@ -175,41 +155,21 @@ def test_rodas5_nonlinear(benchmark, nn_reaction_system, ensemble_size, lu_preci
         warmup_rounds=1,
         rounds=1,
     )
+    results_np = np.asarray(results)
 
-    assert results.shape == (ensemble_size, len(_T_SPAN), system["n_vars"])
-    np.testing.assert_allclose(results.sum(axis=2), 1.0, atol=3e-6)
+    assert results.shape == (ensemble_size, len(_TIMES), system["n_vars"])
+    np.testing.assert_allclose(results_np.sum(axis=2), 1.0, atol=3e-6)
 
-
-@pytest.mark.parametrize("nn_reaction_system", [70], indirect=True, ids=_dim_id)
-@pytest.mark.parametrize("ensemble_size", [2])
-@pytest.mark.parametrize("lu_precision", ["fp32"])
-def test_rodas5_nonlinear_matches_reference(
-    nn_reaction_system, ensemble_size, lu_precision
-):
-    """Validate rodas5 nonlinear against Kvaerno5 (diffrax) on a 70D system, N=2, fp32."""
-    system = nn_reaction_system
-    params = _make_params_batch(ensemble_size, seed=42)
-    solve = make_rodas5_nonlinear(ode_fn=system["ode_fn"], lu_precision=lu_precision)
-    solve_ref = make_kvaerno5_solver(system["ode_fn"])
-
-    y = solve(
-        y0=system["y0"],
-        t_span=_MULTI_SAVE_TIMES,
-        params=params,
-        first_step=1e-6,
-        rtol=1e-6,
-        atol=1e-8,
-    ).block_until_ready()
-
-    y_ref = solve_ref(
-        y0=system["y0"],
-        t_span=_MULTI_SAVE_TIMES,
-        params=params,
-        first_step=1e-6,
-        rtol=1e-8,
-        atol=1e-10,
-    ).block_until_ready()
-
-    assert y.shape == (2, len(_MULTI_SAVE_TIMES), 70)
-    np.testing.assert_allclose(y.sum(axis=2), 1.0, atol=3e-6)
-    np.testing.assert_allclose(np.asarray(y), np.asarray(y_ref), rtol=2e-4, atol=3e-8)
+    if ensemble_size in _REFERENCE_ENSEMBLE_SIZES:
+        solve_ref = make_cached_kvaerno5_solver(system["ode_fn"])
+        y_ref = solve_ref(
+            y0=system["y0"],
+            t_span=_TIMES,
+            params=params,
+            first_step=1e-6,
+            rtol=1e-8,
+            atol=1e-10,
+        ).block_until_ready()
+        np.testing.assert_allclose(
+            results_np, np.asarray(y_ref), rtol=2e-4, atol=3e-8
+        )

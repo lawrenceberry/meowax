@@ -43,8 +43,7 @@ import pytest
 from solvers.linear.rodas5_linear import make_solver as make_rodas5_linear
 from solvers.nonlinear.rodas5_nonlinear import make_solver as make_rodas5_nonlinear
 
-_T_SPAN = (0.0, 0.1)
-_MULTI_SAVE_TIMES = jnp.array((0.0, 0.025, 0.05, 0.075, 0.1), dtype=jnp.float64)
+_TIMES = jnp.array((0.0, 0.025, 0.05, 0.075, 0.1), dtype=jnp.float64)
 _SYSTEM_DIMS = [30, 50, 70]
 _ENSEMBLE_SIZES = [2, 100, 1000, 10000, 100_000]
 
@@ -133,7 +132,7 @@ def heat_system(request):
 @pytest.mark.parametrize("ensemble_size", _ENSEMBLE_SIZES)
 @pytest.mark.parametrize("lu_precision", ["fp32", "fp64"])
 def test_rodas5_linear(benchmark, heat_system, ensemble_size, lu_precision):
-    """Rodas5 linear (jac_fn) ensemble benchmark parameterised by dim, size, and precision."""
+    """Rodas5 linear benchmark with exact-solution validation."""
     system = heat_system
     params = _make_params_batch(ensemble_size, seed=42)
     solve = make_rodas5_linear(
@@ -142,7 +141,7 @@ def test_rodas5_linear(benchmark, heat_system, ensemble_size, lu_precision):
     results = benchmark.pedantic(
         lambda: solve(
             y0=system["y0"],
-            t_span=_T_SPAN,
+            t_span=_TIMES,
             params=params,
             first_step=1e-6,
             rtol=1e-6,
@@ -151,37 +150,13 @@ def test_rodas5_linear(benchmark, heat_system, ensemble_size, lu_precision):
         warmup_rounds=1,
         rounds=1,
     )
+    results_np = np.asarray(results)
+    y_exact = _exact_solution(system["n_vars"], _TIMES, params)
 
-    assert results.shape == (ensemble_size, len(_T_SPAN), system["n_vars"])
-    assert np.all(np.isfinite(results))
-    assert np.all(results >= -1e-6)
-
-
-@pytest.mark.parametrize("heat_system", [70], indirect=True, ids=_dim_id)
-@pytest.mark.parametrize("ensemble_size", [2])
-@pytest.mark.parametrize("lu_precision", ["fp32"])
-def test_rodas5_linear_matches_exact(heat_system, ensemble_size, lu_precision):
-    """Validate rodas5 linear against the exact discrete solution on a 70D system, N=2, fp32."""
-    system = heat_system
-    params = _make_params_batch(ensemble_size, seed=42)
-    solve = make_rodas5_linear(
-        jac_fn=system["jac_fn"], lu_precision=lu_precision, mv_precision="fp64"
-    )
-
-    y = solve(
-        y0=system["y0"],
-        t_span=_MULTI_SAVE_TIMES,
-        params=params,
-        first_step=1e-6,
-        rtol=1e-6,
-        atol=1e-8,
-    ).block_until_ready()
-
-    y_exact = _exact_solution(system["n_vars"], _MULTI_SAVE_TIMES, params)
-
-    assert y.shape == (ensemble_size, len(_MULTI_SAVE_TIMES), system["n_vars"])
-    assert np.all(y >= -1e-6)
-    np.testing.assert_allclose(np.asarray(y), y_exact, rtol=1e-3, atol=1e-6)
+    assert results.shape == (ensemble_size, len(_TIMES), system["n_vars"])
+    assert np.all(np.isfinite(results_np))
+    assert np.all(results_np >= -1e-6)
+    np.testing.assert_allclose(results_np, y_exact, rtol=1e-3, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -193,14 +168,14 @@ def test_rodas5_linear_matches_exact(heat_system, ensemble_size, lu_precision):
 @pytest.mark.parametrize("ensemble_size", _ENSEMBLE_SIZES)
 @pytest.mark.parametrize("lu_precision", ["fp32", "fp64"])
 def test_rodas5_nonlinear(benchmark, heat_system, ensemble_size, lu_precision):
-    """Rodas5 nonlinear (ode_fn) ensemble benchmark parameterised by dim, size, and precision."""
+    """Rodas5 nonlinear benchmark with exact-solution validation."""
     system = heat_system
     params = _make_params_batch(ensemble_size, seed=42)
     solve = make_rodas5_nonlinear(ode_fn=system["ode_fn"], lu_precision=lu_precision)
     results = benchmark.pedantic(
         lambda: solve(
             y0=system["y0"],
-            t_span=_T_SPAN,
+            t_span=_TIMES,
             params=params,
             first_step=1e-6,
             rtol=1e-6,
@@ -209,32 +184,10 @@ def test_rodas5_nonlinear(benchmark, heat_system, ensemble_size, lu_precision):
         warmup_rounds=1,
         rounds=1,
     )
+    results_np = np.asarray(results)
+    y_exact = _exact_solution(system["n_vars"], _TIMES, params)
 
-    assert results.shape == (ensemble_size, len(_T_SPAN), system["n_vars"])
-    assert np.all(np.isfinite(results))
-    assert np.all(results >= -1e-6)
-
-
-@pytest.mark.parametrize("heat_system", [70], indirect=True, ids=_dim_id)
-@pytest.mark.parametrize("ensemble_size", [2])
-@pytest.mark.parametrize("lu_precision", ["fp32"])
-def test_rodas5_nonlinear_matches_exact(heat_system, ensemble_size, lu_precision):
-    """Validate rodas5 nonlinear against the exact discrete solution on a 70D system, N=2, fp32."""
-    system = heat_system
-    params = _make_params_batch(ensemble_size, seed=42)
-    solve = make_rodas5_nonlinear(ode_fn=system["ode_fn"], lu_precision=lu_precision)
-
-    y = solve(
-        y0=system["y0"],
-        t_span=_MULTI_SAVE_TIMES,
-        params=params,
-        first_step=1e-6,
-        rtol=1e-6,
-        atol=1e-8,
-    ).block_until_ready()
-
-    y_exact = _exact_solution(system["n_vars"], _MULTI_SAVE_TIMES, params)
-
-    assert y.shape == (ensemble_size, len(_MULTI_SAVE_TIMES), system["n_vars"])
-    assert np.all(y >= -1e-6)
-    np.testing.assert_allclose(np.asarray(y), y_exact, rtol=1e-3, atol=1e-6)
+    assert results.shape == (ensemble_size, len(_TIMES), system["n_vars"])
+    assert np.all(np.isfinite(results_np))
+    assert np.all(results_np >= -1e-6)
+    np.testing.assert_allclose(results_np, y_exact, rtol=1e-3, atol=1e-6)
