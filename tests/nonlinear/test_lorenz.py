@@ -41,6 +41,24 @@ from tests.reference_solvers.python.diffrax_kvaerno5 import (
 from tests.reference_solvers.python.diffrax_tsit5 import (
     make_solver as make_diffrax_tsit5_solver,
 )
+from tests.reference_solvers.python.julia_common import (
+    JULIA_ENSEMBLE_BACKENDS,
+    benchmark_julia_solver,
+    julia_backend_id,
+    maybe_mark_large_ensemble_sizes,
+)
+from tests.reference_solvers.python.julia_kencarp5 import (
+    make_solver as make_julia_kencarp5_solver,
+)
+from tests.reference_solvers.python.julia_kvaerno5 import (
+    make_solver as make_julia_kvaerno5_solver,
+)
+from tests.reference_solvers.python.julia_rodas5 import (
+    make_solver as make_julia_rodas5_solver,
+)
+from tests.reference_solvers.python.julia_tsit5 import (
+    make_solver as make_julia_tsit5_solver,
+)
 
 _T_SPAN = (0.0, 5.0)
 _ATTRACTOR_TIMES = jnp.array([0.0, 5.0, 10.0, 15.0, 20.0], dtype=jnp.float64)
@@ -106,6 +124,27 @@ def _assert_on_attractor(states):
     )
     assert np.all(z > _Z_MIN), f"z below attractor: min z = {z.min():.2f}"
     assert np.all(z < _Z_MAX), f"z above attractor: max z = {z.max():.2f}"
+
+
+def _run_julia_lorenz(benchmark, solver_factory, ensemble_size, ensemble_backend):
+    system = _make_lorenz_system()
+    params = _make_params_batch(ensemble_size, seed=42)
+    solve = solver_factory(
+        "lorenz",
+        system_config={},
+        ensemble_backend=ensemble_backend,
+    )
+    t_span = jnp.array(list(_T_SPAN), dtype=jnp.float64)
+    return benchmark_julia_solver(
+        benchmark,
+        solve,
+        y0=system["y0"],
+        t_span=t_span,
+        params=params,
+        first_step=1e-4,
+        rtol=1e-6,
+        atol=1e-8,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -353,3 +392,59 @@ def test_diffrax_kvaerno5(benchmark, ensemble_size):
     assert results.shape == (ensemble_size, len(_T_SPAN), system["n_vars"])
     assert np.all(np.isfinite(results))
     _assert_on_attractor(np.asarray(results[:, -1, :]))
+
+
+@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
+)
+def test_julia_tsit5(benchmark, ensemble_size, ensemble_backend):
+    """Julia Tsit5 benchmark with attractor-confinement validation."""
+    results_np = _run_julia_lorenz(
+        benchmark, make_julia_tsit5_solver, ensemble_size, ensemble_backend
+    )
+    assert results_np.shape == (ensemble_size, len(_T_SPAN), 3)
+    assert np.all(np.isfinite(results_np))
+    _assert_on_attractor(results_np[:, -1, :])
+
+
+@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
+)
+def test_julia_kencarp5(benchmark, ensemble_size, ensemble_backend):
+    """Julia KenCarp5 benchmark with attractor-confinement validation."""
+    results_np = _run_julia_lorenz(
+        benchmark, make_julia_kencarp5_solver, ensemble_size, ensemble_backend
+    )
+    assert results_np.shape == (ensemble_size, len(_T_SPAN), 3)
+    assert np.all(np.isfinite(results_np))
+    _assert_on_attractor(results_np[:, -1, :])
+
+
+@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
+)
+def test_julia_rodas5(benchmark, ensemble_size, ensemble_backend):
+    """Julia Rodas5 benchmark with attractor-confinement validation."""
+    results_np = _run_julia_lorenz(
+        benchmark, make_julia_rodas5_solver, ensemble_size, ensemble_backend
+    )
+    assert results_np.shape == (ensemble_size, len(_T_SPAN), 3)
+    assert np.all(np.isfinite(results_np))
+    _assert_on_attractor(results_np[:, -1, :])
+
+
+@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
+)
+def test_julia_kvaerno5(benchmark, ensemble_size, ensemble_backend):
+    """Julia Kvaerno5 benchmark with attractor-confinement validation."""
+    results_np = _run_julia_lorenz(
+        benchmark, make_julia_kvaerno5_solver, ensemble_size, ensemble_backend
+    )
+    assert results_np.shape == (ensemble_size, len(_T_SPAN), 3)
+    assert np.all(np.isfinite(results_np))
+    _assert_on_attractor(results_np[:, -1, :])

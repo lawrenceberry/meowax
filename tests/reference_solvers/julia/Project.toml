@@ -1,0 +1,7 @@
+[deps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+DiffEqGPU = "071ae1c0-96b5-11e9-1965-c90190d839ea"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+OrdinaryDiffEq = "1dea7af3-3e70-54e6-95c3-0bf5283fa5ed"
+SciMLBase = "0bca4576-84f4-4d90-8ffe-ffa030f20462"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"

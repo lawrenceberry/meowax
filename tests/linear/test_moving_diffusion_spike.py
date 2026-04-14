@@ -45,6 +45,24 @@ from tests.reference_solvers.python.diffrax_kvaerno5 import (
 from tests.reference_solvers.python.diffrax_kvaerno5 import (
     make_solver as make_kvaerno5_solver,
 )
+from tests.reference_solvers.python.julia_common import (
+    JULIA_ENSEMBLE_BACKENDS,
+    benchmark_julia_solver,
+    julia_backend_id,
+    maybe_mark_large_ensemble_sizes,
+)
+from tests.reference_solvers.python.julia_kencarp5 import (
+    make_solver as make_julia_kencarp5_solver,
+)
+from tests.reference_solvers.python.julia_kvaerno5 import (
+    make_solver as make_julia_kvaerno5_solver,
+)
+from tests.reference_solvers.python.julia_rodas5 import (
+    make_solver as make_julia_rodas5_solver,
+)
+from tests.reference_solvers.python.julia_tsit5 import (
+    make_solver as make_julia_tsit5_solver,
+)
 
 _BACKGROUND_DIFFUSIVITY = 1e-4
 _SPIKE_DIFFUSIVITY = 2e-1
@@ -133,6 +151,32 @@ def _make_params_batch(size, seed):
     return jnp.array(
         1.0 + 0.1 * (2.0 * rng.random((size, 1)) - 1.0),
         dtype=jnp.float64,
+    )
+
+
+def _run_julia_moving_diffusion_spike(
+    benchmark,
+    solver_factory,
+    moving_diffusion_spike_system,
+    ensemble_size,
+    ensemble_backend,
+):
+    system = moving_diffusion_spike_system
+    params = _make_params_batch(ensemble_size, seed=42)
+    solve = solver_factory(
+        "moving_diffusion_spike",
+        system_config={"n_vars": system["n_vars"]},
+        ensemble_backend=ensemble_backend,
+    )
+    return system, benchmark_julia_solver(
+        benchmark,
+        solve,
+        y0=system["y0"],
+        t_span=_TIMES,
+        params=params,
+        first_step=1e-6,
+        rtol=1e-6,
+        atol=1e-8,
     )
 
 
@@ -413,5 +457,97 @@ def test_diffrax_kvaerno5(benchmark, moving_diffusion_spike_system, ensemble_siz
     results_np = np.asarray(results)
 
     assert results.shape == (ensemble_size, len(_TIMES), system["n_vars"])
+    assert np.all(np.isfinite(results_np))
+    np.testing.assert_allclose(results_np.sum(axis=2), 1.0, atol=3e-6)
+
+
+@pytest.mark.parametrize(
+    "moving_diffusion_spike_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id
+)
+@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
+)
+def test_julia_tsit5(
+    benchmark, moving_diffusion_spike_system, ensemble_size, ensemble_backend
+):
+    """Julia Tsit5 benchmark with mass-conservation validation."""
+    system, results_np = _run_julia_moving_diffusion_spike(
+        benchmark,
+        make_julia_tsit5_solver,
+        moving_diffusion_spike_system,
+        ensemble_size,
+        ensemble_backend,
+    )
+    assert results_np.shape == (ensemble_size, len(_TIMES), system["n_vars"])
+    assert np.all(np.isfinite(results_np))
+    np.testing.assert_allclose(results_np.sum(axis=2), 1.0, atol=3e-6)
+
+
+@pytest.mark.parametrize(
+    "moving_diffusion_spike_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id
+)
+@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
+)
+def test_julia_kencarp5(
+    benchmark, moving_diffusion_spike_system, ensemble_size, ensemble_backend
+):
+    """Julia KenCarp5 benchmark with mass-conservation validation."""
+    system, results_np = _run_julia_moving_diffusion_spike(
+        benchmark,
+        make_julia_kencarp5_solver,
+        moving_diffusion_spike_system,
+        ensemble_size,
+        ensemble_backend,
+    )
+    assert results_np.shape == (ensemble_size, len(_TIMES), system["n_vars"])
+    assert np.all(np.isfinite(results_np))
+    np.testing.assert_allclose(results_np.sum(axis=2), 1.0, atol=3e-6)
+
+
+@pytest.mark.parametrize(
+    "moving_diffusion_spike_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id
+)
+@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
+)
+def test_julia_rodas5(
+    benchmark, moving_diffusion_spike_system, ensemble_size, ensemble_backend
+):
+    """Julia Rodas5 benchmark with mass-conservation validation."""
+    system, results_np = _run_julia_moving_diffusion_spike(
+        benchmark,
+        make_julia_rodas5_solver,
+        moving_diffusion_spike_system,
+        ensemble_size,
+        ensemble_backend,
+    )
+    assert results_np.shape == (ensemble_size, len(_TIMES), system["n_vars"])
+    assert np.all(np.isfinite(results_np))
+    np.testing.assert_allclose(results_np.sum(axis=2), 1.0, atol=3e-6)
+
+
+@pytest.mark.parametrize(
+    "moving_diffusion_spike_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id
+)
+@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
+)
+def test_julia_kvaerno5(
+    benchmark, moving_diffusion_spike_system, ensemble_size, ensemble_backend
+):
+    """Julia Kvaerno5 benchmark with mass-conservation validation."""
+    system, results_np = _run_julia_moving_diffusion_spike(
+        benchmark,
+        make_julia_kvaerno5_solver,
+        moving_diffusion_spike_system,
+        ensemble_size,
+        ensemble_backend,
+    )
+    assert results_np.shape == (ensemble_size, len(_TIMES), system["n_vars"])
     assert np.all(np.isfinite(results_np))
     np.testing.assert_allclose(results_np.sum(axis=2), 1.0, atol=3e-6)
