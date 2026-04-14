@@ -39,6 +39,9 @@ import pytest
 
 from solvers.linear.rodas5_linear import make_solver as make_rodas5_linear
 from solvers.nonlinear.rodas5_nonlinear import make_solver as make_rodas5_nonlinear
+from tests.reference_solvers.python.diffrax_kvaerno5 import (
+    make_solver as make_kvaerno5_solver,
+)
 
 _TIMES = jnp.array((0.0, 0.025, 0.05, 0.075, 0.1), dtype=jnp.float64)
 _SYSTEM_DIMS = [30, 50, 70]
@@ -177,6 +180,45 @@ def test_rodas5_nonlinear(benchmark, heat_system, ensemble_size, lu_precision):
             first_step=1e-6,
             rtol=1e-6,
             atol=1e-8,
+        ).block_until_ready(),
+        warmup_rounds=1,
+        rounds=1,
+    )
+    results_np = np.asarray(results)
+    y_exact = _exact_solution(system["n_vars"], _TIMES, params)
+
+    assert results.shape == (ensemble_size, len(_TIMES), system["n_vars"])
+    assert np.all(np.isfinite(results_np))
+    assert np.all(results_np >= -1e-6)
+    np.testing.assert_allclose(results_np, y_exact, rtol=1e-3, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Diffrax Kvaerno5 (reference solver timing)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("heat_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id)
+@pytest.mark.parametrize(
+    "ensemble_size",
+    [
+        pytest.param(n, marks=pytest.mark.slow) if n >= 10000 else n
+        for n in _ENSEMBLE_SIZES
+    ],
+)
+def test_diffrax_kvaerno5(benchmark, heat_system, ensemble_size):
+    """Diffrax Kvaerno5 benchmark with exact-solution validation."""
+    system = heat_system
+    params = _make_params_batch(ensemble_size, seed=42)
+    solve = make_kvaerno5_solver(system["ode_fn"])
+    results = benchmark.pedantic(
+        lambda: solve(
+            y0=system["y0"],
+            t_span=_TIMES,
+            params=params,
+            first_step=1e-6,
+            rtol=1e-8,
+            atol=1e-10,
         ).block_until_ready(),
         warmup_rounds=1,
         rounds=1,

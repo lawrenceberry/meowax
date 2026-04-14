@@ -30,6 +30,9 @@ import numpy as np
 import pytest
 
 from solvers.nonlinear.rodas5_nonlinear import make_solver as make_rodas5_nonlinear
+from tests.reference_solvers.python.diffrax_kvaerno5 import (
+    make_solver as make_kvaerno5_solver,
+)
 
 _T_SPAN = (0.0, 5.0)
 _ATTRACTOR_TIMES = jnp.array([0.0, 5.0, 10.0, 15.0, 20.0], dtype=jnp.float64)
@@ -145,3 +148,33 @@ def test_rodas5_nonlinear_stays_on_attractor(ensemble_size, lu_precision):
     assert np.all(np.isfinite(y))
     for t_idx in range(len(_ATTRACTOR_TIMES)):
         _assert_on_attractor(np.asarray(y[:, t_idx, :]))
+
+
+# ---------------------------------------------------------------------------
+# Diffrax Kvaerno5 (reference solver timing)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ensemble_size", _ENSEMBLE_SIZES)
+def test_diffrax_kvaerno5(benchmark, ensemble_size):
+    """Diffrax Kvaerno5 benchmark with attractor-confinement validation."""
+    system = _make_lorenz_system()
+    params = _make_params_batch(ensemble_size, seed=42)
+    solve = make_kvaerno5_solver(system["ode_fn"])
+    t_span = jnp.array(list(_T_SPAN), dtype=jnp.float64)
+    results = benchmark.pedantic(
+        lambda: solve(
+            y0=system["y0"],
+            t_span=t_span,
+            params=params,
+            first_step=1e-4,
+            rtol=1e-8,
+            atol=1e-10,
+        ).block_until_ready(),
+        warmup_rounds=1,
+        rounds=1,
+    )
+
+    assert results.shape == (ensemble_size, len(_T_SPAN), system["n_vars"])
+    assert np.all(np.isfinite(results))
+    _assert_on_attractor(np.asarray(results[:, -1, :]))
