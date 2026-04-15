@@ -137,7 +137,8 @@ def make_solver(
     lu_dtype = jnp.float32 if lu_precision == "fp32" else jnp.float64
 
     _ode_batched = jax.vmap(ode_fn)
-    _jac_batched = jax.vmap(lambda y, t, p: jax.jacfwd(lambda y_: ode_fn(y_, t, p))(y))
+    _jac_fn = jax.jacfwd(ode_fn, argnums=0)
+    _jac_batched = jax.vmap(_jac_fn)
 
     @functools.partial(jax.jit, static_argnames=("n_save", "max_steps"))
     def _solve_impl(
@@ -283,10 +284,7 @@ def make_solver(
                 err_norm = jnp.sqrt(jnp.mean((err_est / scale) ** 2, axis=1))
 
                 accept = (
-                    active
-                    & (err_norm <= 1.0)
-                    & ~jnp.isnan(err_norm)
-                    & ~stage_failed
+                    active & (err_norm <= 1.0) & ~jnp.isnan(err_norm) & ~stage_failed
                 )
                 t_new = jnp.where(accept, t + dt_use, t)
                 y_out = jnp.where(accept[:, None], y_new, y)

@@ -107,9 +107,8 @@ def make_solver(
     lu_solve_batched = jax.vmap(jax.scipy.linalg.lu_solve)
     _explicit_batched = jax.vmap(explicit_ode_fn)
     _implicit_batched = jax.vmap(implicit_ode_fn)
-    _implicit_jac_batched = jax.vmap(
-        lambda y, t, p: jax.jacfwd(lambda y_: implicit_ode_fn(y_, t, p))(y)
-    )
+    _implicit_jac_fn = jax.jacfwd(implicit_ode_fn, argnums=0)
+    _implicit_jac_batched = jax.vmap(_implicit_jac_fn)
 
     @functools.partial(jax.jit, static_argnames=("n_save", "max_steps"))
     def _solve_impl(
@@ -193,8 +192,10 @@ def make_solver(
                 stage_y.append(y_stage)
                 stage_fe.append(fe_stage)
                 stage_fi.append(fi_stage)
-                failed = failed | jnp.any(~jnp.isfinite(fe_stage), axis=1) | jnp.any(
-                    ~jnp.isfinite(fi_stage), axis=1
+                failed = (
+                    failed
+                    | jnp.any(~jnp.isfinite(fe_stage), axis=1)
+                    | jnp.any(~jnp.isfinite(fi_stage), axis=1)
                 )
 
                 for i in range(1, 8):
@@ -233,8 +234,10 @@ def make_solver(
                 for i in range(8):
                     total_stage = stage_fe[i] + stage_fi[i]
                     err_est = err_est + dt_col * _B_ERROR[i] * total_stage
-                failed = failed | jnp.any(~jnp.isfinite(y_new), axis=1) | jnp.any(
-                    ~jnp.isfinite(err_est), axis=1
+                failed = (
+                    failed
+                    | jnp.any(~jnp.isfinite(y_new), axis=1)
+                    | jnp.any(~jnp.isfinite(err_est), axis=1)
                 )
                 return y_new, err_est, failed
 
@@ -258,10 +261,7 @@ def make_solver(
                 err_norm = jnp.sqrt(jnp.mean((err_est / scale) ** 2, axis=1))
 
                 accept = (
-                    active
-                    & (err_norm <= 1.0)
-                    & ~jnp.isnan(err_norm)
-                    & ~stage_failed
+                    active & (err_norm <= 1.0) & ~jnp.isnan(err_norm) & ~stage_failed
                 )
                 t_new = jnp.where(accept, t + dt_use, t)
                 y_out = jnp.where(accept[:, None], y_new, y)
