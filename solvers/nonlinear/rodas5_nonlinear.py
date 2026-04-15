@@ -58,8 +58,7 @@ def make_solver(
     Parameters
     ----------
     ode_fn : callable
-        ODE right-hand side with signature ``ode_fn(y, t, params) -> dy/dt``.
-        The Jacobian is recomputed at every step via ``jax.jacfwd``.
+        ODE right-hand side with signature ``dy/dt = ode_fn(y, t, params)``.
     lu_precision :
         Precision for LU factorization and LU solve: ``"fp32"`` or ``"fp64"``.
     batch_size : int or None
@@ -72,7 +71,8 @@ def make_solver(
     lu_solve_batched = jax.vmap(jax.scipy.linalg.lu_solve)
 
     _ode_batched = jax.vmap(ode_fn)
-    _jac_batched = jax.vmap(lambda y, t, p: jax.jacfwd(lambda y_: ode_fn(y_, t, p))(y))
+    _jac_fn = jax.jacfwd(ode_fn, argnums=0)
+    _jac_batched = jax.vmap(_jac_fn)
 
     @functools.partial(
         jax.jit,
@@ -98,10 +98,9 @@ def make_solver(
             save_idx_init = jnp.ones((bs,), dtype=jnp.int32)
 
             def _step_batch(y, t, dt):
-                jac = _jac_batched(y, t, params_batch)
-                jac_lu = jac.astype(lu_dtype)
+                jac = _jac_batched(y, t, params_batch).astype(lu_dtype)
                 dtgamma_inv = (1.0 / (dt * _gamma)).astype(lu_dtype)[:, None, None]
-                lu = lu_factor_batched(dtgamma_inv * eye - jac_lu)
+                lu = lu_factor_batched(dtgamma_inv * eye - jac)
                 inv_dt = (1.0 / dt)[:, None]
 
                 def f_eval(u, t_stage):
