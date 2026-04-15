@@ -54,8 +54,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from solvers.linear.kencarp5_linear import make_solver as make_kencarp5_linear
-from solvers.linear.rodas5_linear import make_solver as make_rodas5_linear
 from solvers.nonlinear.kencarp5_nonlinear import make_solver as make_kencarp5_nonlinear
 from solvers.nonlinear.rodas5_nonlinear import make_solver as make_rodas5_nonlinear
 from tests.reference_solvers.python.diffrax_kencarp5 import (
@@ -171,16 +169,16 @@ def _exact_solution(M_np, y0_np, t_span, params):
     array, shape [N, n_save, n_vars]
     """
     d, L = np.linalg.eig(M_np)
-    d = np.real(d)                       # eigenvalues are −λᵢ, all real
-    L = np.real(L)                       # eigenvectors are all real
-    w = np.linalg.solve(L, y0_np)       # L⁻¹ @ y0, shape (n_vars,)
+    d = np.real(d)  # eigenvalues are −λᵢ, all real
+    L = np.real(L)  # eigenvectors are all real
+    w = np.linalg.solve(L, y0_np)  # L⁻¹ @ y0, shape (n_vars,)
 
     t_arr = np.asarray(t_span, dtype=np.float64)
     s_arr = np.asarray(params, dtype=np.float64)[:, 0]
 
-    alpha = np.outer(s_arr, t_arr)                   # (N, n_save): p[0]·t per trajectory
-    exp_vals = np.exp(alpha[:, :, None] * d)         # (N, n_save, n_vars)
-    return (exp_vals * w) @ L.T                      # (N, n_save, n_vars)
+    alpha = np.outer(s_arr, t_arr)  # (N, n_save): p[0]·t per trajectory
+    exp_vals = np.exp(alpha[:, :, None] * d)  # (N, n_save, n_vars)
+    return (exp_vals * w) @ L.T  # (N, n_save, n_vars)
 
 
 @pytest.fixture
@@ -202,7 +200,9 @@ def _make_params_batch(size, seed):
     )
 
 
-def _run_julia_bateman(benchmark, solver_factory, bateman_system, ensemble_size, ensemble_backend):
+def _run_julia_bateman(
+    benchmark, solver_factory, bateman_system, ensemble_size, ensemble_backend
+):
     system = bateman_system
     params = _make_params_batch(ensemble_size, seed=42)
     solve = solver_factory(
@@ -224,88 +224,6 @@ def _run_julia_bateman(benchmark, solver_factory, bateman_system, ensemble_size,
         atol=1e-8,
     )
     return system, results_np, params
-
-
-# ---------------------------------------------------------------------------
-# Linear solver (jac_fn path)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "bateman_system",
-    [(n, s) for n in _SYSTEM_DIMS for s in _STIFFNESS_RATIOS],
-    indirect=True,
-    ids=_system_id,
-)
-@pytest.mark.parametrize("ensemble_size", _ENSEMBLE_SIZES)
-@pytest.mark.parametrize("lu_precision", ["fp32", "fp64"])
-def test_rodas5_linear(benchmark, bateman_system, ensemble_size, lu_precision):
-    """Rodas5 linear benchmark with conservation and exact-solution validation."""
-    system = bateman_system
-    params = _make_params_batch(ensemble_size, seed=42)
-    solve = make_rodas5_linear(jac_fn=system["jac_fn"], lu_precision=lu_precision)
-    results = benchmark.pedantic(
-        lambda: solve(
-            y0=system["y0"],
-            t_span=_TIMES,
-            params=params,
-            first_step=1e-6,
-            rtol=1e-6,
-            atol=1e-8,
-        ).block_until_ready(),
-        warmup_rounds=1,
-        rounds=1,
-    )
-    results_np = np.asarray(results)
-
-    assert results.shape == (ensemble_size, len(_TIMES), system["n_vars"])
-    assert np.all(np.isfinite(results_np))
-    np.testing.assert_allclose(results_np.sum(axis=-1), 1.0, atol=3e-6)
-    y_exact = _exact_solution(system["M_np"], np.asarray(system["y0"]), _TIMES, params)
-    np.testing.assert_allclose(results_np, y_exact, rtol=1e-2, atol=3e-5)
-
-
-@pytest.mark.parametrize(
-    "bateman_system",
-    [(n, s) for n in _SYSTEM_DIMS for s in _STIFFNESS_RATIOS],
-    indirect=True,
-    ids=_system_id,
-)
-@pytest.mark.parametrize("ensemble_size", _ENSEMBLE_SIZES)
-@pytest.mark.parametrize("lu_precision", ["fp32", "fp64"])
-def test_kencarp5_linear(benchmark, bateman_system, ensemble_size, lu_precision):
-    """KenCarp5 linear benchmark with conservation and exact-solution validation."""
-    system = bateman_system
-    params = _make_params_batch(ensemble_size, seed=42)
-    solve = make_kencarp5_linear(
-        explicit_jac_fn=system["explicit_jac_fn"],
-        implicit_jac_fn=system["implicit_jac_fn"],
-        lu_precision=lu_precision,
-    )
-    results = benchmark.pedantic(
-        lambda: solve(
-            y0=system["y0"],
-            t_span=_TIMES,
-            params=params,
-            first_step=1e-6,
-            rtol=1e-6,
-            atol=1e-8,
-        ).block_until_ready(),
-        warmup_rounds=1,
-        rounds=1,
-    )
-    results_np = np.asarray(results)
-
-    assert results.shape == (ensemble_size, len(_TIMES), system["n_vars"])
-    assert np.all(np.isfinite(results_np))
-    np.testing.assert_allclose(results_np.sum(axis=-1), 1.0, atol=3e-6)
-    y_exact = _exact_solution(system["M_np"], np.asarray(system["y0"]), _TIMES, params)
-    np.testing.assert_allclose(results_np, y_exact, rtol=1e-3, atol=1e-6)
-
-
-# ---------------------------------------------------------------------------
-# Nonlinear solver (ode_fn path)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -459,14 +377,20 @@ def test_diffrax_kvaerno5(benchmark, bateman_system, ensemble_size):
     indirect=True,
     ids=_system_id,
 )
-@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES)
+)
 @pytest.mark.parametrize(
     "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
 )
 def test_julia_tsit5(benchmark, bateman_system, ensemble_size, ensemble_backend):
     """Julia Tsit5 benchmark on Bateman decay chains."""
     system, results_np, params = _run_julia_bateman(
-        benchmark, make_julia_tsit5_solver, bateman_system, ensemble_size, ensemble_backend
+        benchmark,
+        make_julia_tsit5_solver,
+        bateman_system,
+        ensemble_size,
+        ensemble_backend,
     )
     y_exact = _exact_solution(system["M_np"], np.asarray(system["y0"]), _TIMES, params)
     assert results_np.shape == (ensemble_size, len(_TIMES), system["n_vars"])
@@ -481,7 +405,9 @@ def test_julia_tsit5(benchmark, bateman_system, ensemble_size, ensemble_backend)
     indirect=True,
     ids=_system_id,
 )
-@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES)
+)
 @pytest.mark.parametrize(
     "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
 )
@@ -507,14 +433,20 @@ def test_julia_kencarp5(benchmark, bateman_system, ensemble_size, ensemble_backe
     indirect=True,
     ids=_system_id,
 )
-@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES)
+)
 @pytest.mark.parametrize(
     "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
 )
 def test_julia_rodas5(benchmark, bateman_system, ensemble_size, ensemble_backend):
     """Julia Rodas5 benchmark on Bateman decay chains."""
     system, results_np, params = _run_julia_bateman(
-        benchmark, make_julia_rodas5_solver, bateman_system, ensemble_size, ensemble_backend
+        benchmark,
+        make_julia_rodas5_solver,
+        bateman_system,
+        ensemble_size,
+        ensemble_backend,
     )
     y_exact = _exact_solution(system["M_np"], np.asarray(system["y0"]), _TIMES, params)
     assert results_np.shape == (ensemble_size, len(_TIMES), system["n_vars"])
@@ -529,7 +461,9 @@ def test_julia_rodas5(benchmark, bateman_system, ensemble_size, ensemble_backend
     indirect=True,
     ids=_system_id,
 )
-@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES)
+)
 @pytest.mark.parametrize(
     "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
 )

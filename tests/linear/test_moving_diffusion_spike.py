@@ -30,8 +30,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from solvers.linear.kencarp5_linear import make_solver as make_kencarp5_linear
-from solvers.linear.rodas5_linear import make_solver as make_rodas5_linear
 from solvers.nonlinear.kencarp5_nonlinear import (
     make_solver as make_kencarp5_nonlinear,
 )
@@ -184,113 +182,6 @@ def _run_julia_moving_diffusion_spike(
 def moving_diffusion_spike_system(request):
     """Configurable moving diffusion spike system parameterized by dimension."""
     return _make_moving_diffusion_spike_system(request.param)
-
-
-# ---------------------------------------------------------------------------
-# Linear solver (jac_fn path)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "moving_diffusion_spike_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id
-)
-@pytest.mark.parametrize("ensemble_size", _ENSEMBLE_SIZES)
-@pytest.mark.parametrize("lu_precision", ["fp32", "fp64"])
-def test_rodas5_linear(
-    benchmark, moving_diffusion_spike_system, ensemble_size, lu_precision
-):
-    """Rodas5 linear benchmark with cached Diffrax validation on practical ensemble sizes."""
-    system = moving_diffusion_spike_system
-    params = _make_params_batch(ensemble_size, seed=42)
-    solve = make_rodas5_linear(
-        jac_fn=system["jac_fn"],
-        lu_precision=lu_precision,
-        batch_size=1,
-    )
-    results = benchmark.pedantic(
-        lambda: solve(
-            y0=system["y0"],
-            t_span=_TIMES,
-            params=params,
-            first_step=1e-6,
-            rtol=1e-6,
-            atol=1e-8,
-        ).block_until_ready(),
-        warmup_rounds=1,
-        rounds=1,
-    )
-    results_np = np.asarray(results)
-
-    assert results.shape == (ensemble_size, len(_TIMES), system["n_vars"])
-    assert np.all(np.isfinite(results_np))
-    np.testing.assert_allclose(results_np.sum(axis=2), 1.0, atol=3e-6)
-    if ensemble_size in _REFERENCE_ENSEMBLE_SIZES:
-        solve_ref = make_cached_kvaerno5_solver(system["ode_fn"])
-        y_ref = solve_ref(
-            y0=system["y0"],
-            t_span=_TIMES,
-            params=params,
-            first_step=1e-6,
-            rtol=1e-8,
-            atol=1e-10,
-        ).block_until_ready()
-        np.testing.assert_allclose(
-            results_np, np.asarray(y_ref), rtol=_REFERENCE_RTOL, atol=3e-8
-        )
-
-
-@pytest.mark.parametrize(
-    "moving_diffusion_spike_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id
-)
-@pytest.mark.parametrize("ensemble_size", _ENSEMBLE_SIZES)
-@pytest.mark.parametrize("lu_precision", ["fp32", "fp64"])
-def test_kencarp5_linear(
-    benchmark, moving_diffusion_spike_system, ensemble_size, lu_precision
-):
-    """KenCarp5 linear benchmark with cached Diffrax validation on practical ensemble sizes."""
-    system = moving_diffusion_spike_system
-    params = _make_params_batch(ensemble_size, seed=42)
-    solve = make_kencarp5_linear(
-        explicit_jac_fn=system["jac_nonstiff_fn"],
-        implicit_jac_fn=system["jac_stiff_fn"],
-        lu_precision=lu_precision,
-        batch_size=1,
-    )
-    results = benchmark.pedantic(
-        lambda: solve(
-            y0=system["y0"],
-            t_span=_TIMES,
-            params=params,
-            first_step=1e-6,
-            rtol=1e-6,
-            atol=1e-8,
-        ).block_until_ready(),
-        warmup_rounds=1,
-        rounds=1,
-    )
-    results_np = np.asarray(results)
-
-    assert results.shape == (ensemble_size, len(_TIMES), system["n_vars"])
-    assert np.all(np.isfinite(results_np))
-    np.testing.assert_allclose(results_np.sum(axis=2), 1.0, atol=3e-6)
-    if ensemble_size in _REFERENCE_ENSEMBLE_SIZES:
-        solve_ref = make_cached_kvaerno5_solver(system["ode_fn"])
-        y_ref = solve_ref(
-            y0=system["y0"],
-            t_span=_TIMES,
-            params=params,
-            first_step=1e-6,
-            rtol=1e-8,
-            atol=1e-10,
-        ).block_until_ready()
-        np.testing.assert_allclose(
-            results_np, np.asarray(y_ref), rtol=_REFERENCE_RTOL, atol=3e-8
-        )
-
-
-# ---------------------------------------------------------------------------
-# Nonlinear solver (ode_fn path)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -464,7 +355,9 @@ def test_diffrax_kvaerno5(benchmark, moving_diffusion_spike_system, ensemble_siz
 @pytest.mark.parametrize(
     "moving_diffusion_spike_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id
 )
-@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES)
+)
 @pytest.mark.parametrize(
     "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
 )
@@ -487,7 +380,9 @@ def test_julia_tsit5(
 @pytest.mark.parametrize(
     "moving_diffusion_spike_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id
 )
-@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES)
+)
 @pytest.mark.parametrize(
     "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
 )
@@ -510,7 +405,9 @@ def test_julia_kencarp5(
 @pytest.mark.parametrize(
     "moving_diffusion_spike_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id
 )
-@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES)
+)
 @pytest.mark.parametrize(
     "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
 )
@@ -533,7 +430,9 @@ def test_julia_rodas5(
 @pytest.mark.parametrize(
     "moving_diffusion_spike_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id
 )
-@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES)
+)
 @pytest.mark.parametrize(
     "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
 )

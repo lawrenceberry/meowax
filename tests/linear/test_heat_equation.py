@@ -37,8 +37,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from solvers.linear.kencarp5_linear import make_solver as make_kencarp5_linear
-from solvers.linear.rodas5_linear import make_solver as make_rodas5_linear
 from solvers.nonlinear.kencarp5_nonlinear import make_solver as make_kencarp5_nonlinear
 from solvers.nonlinear.rodas5_nonlinear import make_solver as make_rodas5_nonlinear
 from tests.reference_solvers.python.diffrax_kencarp5 import (
@@ -158,7 +156,9 @@ def _make_params_batch(size, seed):
     )
 
 
-def _run_julia_heat(benchmark, solver_factory, heat_system, ensemble_size, ensemble_backend):
+def _run_julia_heat(
+    benchmark, solver_factory, heat_system, ensemble_size, ensemble_backend
+):
     system = heat_system
     params = _make_params_batch(ensemble_size, seed=42)
     solve = solver_factory(
@@ -183,81 +183,6 @@ def _run_julia_heat(benchmark, solver_factory, heat_system, ensemble_size, ensem
 def heat_system(request):
     """Configurable heat equation system parameterized by grid dimension."""
     return _make_heat_system(request.param)
-
-
-# ---------------------------------------------------------------------------
-# Linear solver (jac_fn path)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("heat_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id)
-@pytest.mark.parametrize("ensemble_size", _ENSEMBLE_SIZES)
-@pytest.mark.parametrize("lu_precision", ["fp32", "fp64"])
-def test_rodas5_linear(benchmark, heat_system, ensemble_size, lu_precision):
-    """Rodas5 linear benchmark with exact-solution validation."""
-    system = heat_system
-    params = _make_params_batch(ensemble_size, seed=42)
-    solve = make_rodas5_linear(
-        jac_fn=system["jac_fn"], lu_precision=lu_precision, mv_precision="fp64"
-    )
-    results = benchmark.pedantic(
-        lambda: solve(
-            y0=system["y0"],
-            t_span=_TIMES,
-            params=params,
-            first_step=1e-6,
-            rtol=1e-6,
-            atol=1e-8,
-        ).block_until_ready(),
-        warmup_rounds=1,
-        rounds=1,
-    )
-    results_np = np.asarray(results)
-    y_exact = _exact_solution(system["n_vars"], _TIMES, params)
-
-    assert results.shape == (ensemble_size, len(_TIMES), system["n_vars"])
-    assert np.all(np.isfinite(results_np))
-    assert np.all(results_np >= -1e-6)
-    np.testing.assert_allclose(results_np, y_exact, rtol=1e-3, atol=1e-6)
-
-
-@pytest.mark.parametrize("heat_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id)
-@pytest.mark.parametrize("ensemble_size", _ENSEMBLE_SIZES)
-@pytest.mark.parametrize("lu_precision", ["fp32", "fp64"])
-def test_kencarp5_linear(benchmark, heat_system, ensemble_size, lu_precision):
-    """KenCarp5 linear benchmark with exact-solution validation."""
-    system = heat_system
-    params = _make_params_batch(ensemble_size, seed=42)
-    solve = make_kencarp5_linear(
-        explicit_jac_fn=system["explicit_jac_fn"],
-        implicit_jac_fn=system["implicit_jac_fn"],
-        lu_precision=lu_precision,
-        mv_precision="fp64",
-    )
-    results = benchmark.pedantic(
-        lambda: solve(
-            y0=system["y0"],
-            t_span=_TIMES,
-            params=params,
-            first_step=1e-6,
-            rtol=1e-6,
-            atol=1e-8,
-        ).block_until_ready(),
-        warmup_rounds=1,
-        rounds=1,
-    )
-    results_np = np.asarray(results)
-    y_exact = _exact_solution(system["n_vars"], _TIMES, params)
-
-    assert results.shape == (ensemble_size, len(_TIMES), system["n_vars"])
-    assert np.all(np.isfinite(results_np))
-    assert np.all(results_np >= -1e-6)
-    np.testing.assert_allclose(results_np, y_exact, rtol=1e-3, atol=1e-6)
-
-
-# ---------------------------------------------------------------------------
-# Nonlinear solver (ode_fn path)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("heat_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id)
@@ -392,7 +317,9 @@ def test_diffrax_kvaerno5(benchmark, heat_system, ensemble_size):
 
 
 @pytest.mark.parametrize("heat_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id)
-@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES)
+)
 @pytest.mark.parametrize(
     "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
 )
@@ -409,7 +336,9 @@ def test_julia_tsit5(benchmark, heat_system, ensemble_size, ensemble_backend):
 
 
 @pytest.mark.parametrize("heat_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id)
-@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES)
+)
 @pytest.mark.parametrize(
     "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
 )
@@ -430,14 +359,20 @@ def test_julia_kencarp5(benchmark, heat_system, ensemble_size, ensemble_backend)
 
 
 @pytest.mark.parametrize("heat_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id)
-@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES)
+)
 @pytest.mark.parametrize(
     "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
 )
 def test_julia_rodas5(benchmark, heat_system, ensemble_size, ensemble_backend):
     """Julia Rodas5 benchmark with exact-solution validation."""
     system, results_np, params = _run_julia_heat(
-        benchmark, make_julia_rodas5_solver, heat_system, ensemble_size, ensemble_backend
+        benchmark,
+        make_julia_rodas5_solver,
+        heat_system,
+        ensemble_size,
+        ensemble_backend,
     )
     y_exact = _exact_solution(system["n_vars"], _TIMES, params)
     assert results_np.shape == (ensemble_size, len(_TIMES), system["n_vars"])
@@ -447,7 +382,9 @@ def test_julia_rodas5(benchmark, heat_system, ensemble_size, ensemble_backend):
 
 
 @pytest.mark.parametrize("heat_system", _SYSTEM_DIMS, indirect=True, ids=_dim_id)
-@pytest.mark.parametrize("ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES))
+@pytest.mark.parametrize(
+    "ensemble_size", maybe_mark_large_ensemble_sizes(_ENSEMBLE_SIZES)
+)
 @pytest.mark.parametrize(
     "ensemble_backend", JULIA_ENSEMBLE_BACKENDS, ids=julia_backend_id
 )
