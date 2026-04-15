@@ -32,6 +32,7 @@ import numpy as np
 import pytest
 
 from solvers.kencarp5 import make_solver as make_kencarp5
+from solvers.kencarpgersh5 import make_solver as make_kencarpgersh5
 from solvers.rodas5 import make_solver as make_rodas5
 from solvers.tsit5 import make_solver as make_tsit5
 from tests.reference_solvers.python.diffrax_kencarp5 import (
@@ -212,6 +213,34 @@ def test_kencarp5(benchmark, ensemble_size, lu_precision):
     solve = make_kencarp5(
         explicit_ode_fn=system["explicit_ode_fn"],
         implicit_ode_fn=system["implicit_ode_fn"],
+        lu_precision=lu_precision,
+    )
+    results = benchmark.pedantic(
+        lambda: solve(
+            y0=system["y0"],
+            t_span=_T_SPAN,
+            params=params,
+            first_step=1e-4,
+            rtol=1e-6,
+            atol=1e-8,
+        ).block_until_ready(),
+        warmup_rounds=1,
+        rounds=1,
+    )
+
+    assert results.shape == (ensemble_size, len(_T_SPAN), system["n_vars"])
+    assert np.all(np.isfinite(results))
+    _assert_on_attractor(np.asarray(results[:, -1, :]))
+
+
+@pytest.mark.parametrize("ensemble_size", _ENSEMBLE_SIZES)
+@pytest.mark.parametrize("lu_precision", ["fp32", "fp64"])
+def test_kencarpgersh5(benchmark, ensemble_size, lu_precision):
+    """KenCarp5 nonlinear ensemble benchmark on the Lorenz system."""
+    system = _make_lorenz_system()
+    params = _make_params_batch(ensemble_size, seed=42)
+    solve = make_kencarpgersh5(
+        ode_fn=system["ode_fn"],
         lu_precision=lu_precision,
     )
     results = benchmark.pedantic(
