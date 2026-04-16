@@ -1,15 +1,14 @@
-Implement a new IMEX solver named kencarpgersh5.py that is a dynamic version of kencarp5 but instead of taking a split ode or jacobian function, it takes a single ode or jacobian, and at every step in the loop of the solver splits the resulting jacobian into stiff and non-stiff parts using Gershgorin's circle theorem and subsequent reodering of the jacobian matrix. Please write a docstring as part of the solver files that describes the method in detail, what it aims to do and in what situations it is better than the ordinary kencarp5.py method.
+Currently kencarpgersh5.py implements exactly the same solver as kencarp5.py. Convert it to a dynamic IMEX solver that takes a single ode_fn and at every step splits the function into implicit and explicit terms using Gershgorin's circle therem. Please write a docstring as part of the solver files that describes the method in detail, what it aims to do and in what situations it is better than the ordinary kencarp5.py method.
 
-Here is an overview of the idea:
+This will involve: replacing the upfront implicit and explicit terms with a single provided ode_fn, replacing _explicit_batched and _implicit_batched with combined _ode_batched and _implicit_jac_fn and _implicit_jac_batched with _jac_fn and _jac_batched. The batched jacobian should be evaluated at the start of every _step_batch, and the circle theorem should be applied to this Jacobian as follows:
 
-The **Gershgorin Circle Theorem** is a powerful shortcut because it allows us to estimate the "danger zone" of a matrix's eigenvalues without actually solving a characteristic equation. When we use it to partition a matrix $M$, we are essentially sorting the rows of the system into "fast" and "slow" categories.
+The **Gershgorin Circle Theorem** is a powerful shortcut because it allows us to estimate the "danger zone" of a matrix's eigenvalues without actually solving a characteristic equation. When we use it to partition a Jacobian matrix $M$, we are essentially sorting the rows of the system into "fast" and "slow" categories.
 
 Here is the step-by-step breakdown of how you would perform this partition.
 
 ## 1. The Core Logic: Estimating Local "Speed"
 
-Recall that for each row $i$ of your matrix $M$, the eigenvalues $\lambda$ must lie within a disk $D_i$ centered at the diagonal element $M_{ii}$ with a radius $R_i$ equal to the sum of the absolute values of the off-diagonal elements:
-
+Recall that for each row $i$ of your Jacobian matrix $M$, the eigenvalues $\lambda$ must lie within a disk $D_i$ centered at the diagonal element $M_{ii}$ with a radius $R_i$ equal to the sum of the absolute values of the off-diagonal elements:
 
 $$
 R_i = \sum_{j \neq i} |M_{ij}|
@@ -40,19 +39,18 @@ Now, you split the indices of your system into two sets:
 - **Stiff Set (S):** All indices $i$ where $\rho_i > \tau$.
 - **Non-Stiff Set (N):** All indices $i$ where $\rho_i \leq \tau$.
 
-### Step 4: Assemble the Matrices
+### Step 4: Split the Jacobian and the ODE function into explicit and implicit parts
 
-You can now create your additive split $M = M_{\text{stiff}} + M_{\text{non-stiff}}$ based on these sets. 
+You can now create your additive split based on these sets. When you use the Gershgorin row-sum method, you are essentially categorizing each **equation** in your system as either "fast" or "slow." Simply put the "fast" rows into the stiff matrix and the "slow" rows into the non-stiff 
+matrix.
 
-Simply put the "fast" rows into the stiff matrix and the "slow" rows into the non-stiff matrix.
+- **M_stiff​**: Contains rows $i \in \mathcal{S}$ of the original Jacobian matrix $M$, and all other rows are zero.
+- **M_non_stiff​**: Contains rows $i \in \mathcal{N}$ of the original Jacobian matrix $M$, and all other rows are zero.
 
-- **Mstiff​**: Contains rows $i \in \mathcal{S}$ of the original matrix $M$, and all other rows are zero.
-- **Mnon-stiff​**: Contains rows $i \in \mathcal{N}$ of the original matrix $M$, and all other rows are zero.
+- **f_impl(y)​**: Contains only indices of f(y) corresponding to the fast rows of the Jacobian, and all other rows are zeroed out.
+- **f_expl(y)​**: Contains only indices of f(y) corresponding to the slow rows of the Jacobian, and all other rows are zeroed out.
 
-## 3. Why this works for IMEX
-
-When you plug this into an IMEX scheme, your implicit step only "cares" about the rows in $M_{\text{stiff}}$.
-If your $M_{\text{stiff}}$ is sparse or has a specific structure (like being mostly zero except for a few rows), the linear solve $(I - h\gamma M_{\text{stiff}})$ becomes much cheaper. In the example above, the implicit solve only actually involves $y_2$, while $y_1$ can be updated explicitly.
+The resulting batched f_impl and f_expl components can then be passed through to the normal kencarp5 method. The jacobian need not be rederived for f_impl, as we have already computed it as M_stiff.
 
 ### The Trade-off
 
