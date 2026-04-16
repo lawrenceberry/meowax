@@ -322,139 +322,6 @@ def make_solver(
             dt_init = jnp.full((bs,), dt0, dtype=jnp.float64)
             save_idx_init = jnp.ones((bs,), dtype=jnp.int32)
 
-            if linear:
-
-                def _solve_stage(
-                    base,
-                    t_stage,
-                    dt,
-                    predictor,
-                    _split_batched_fn,
-                    _implicit_jac_batched,
-                ):
-                    gamma_dt = dt * _GAMMA
-                    jac = _implicit_jac_batched(predictor, t_stage, params_batch)
-                    mask = jnp.any(jac != 0.0, axis=2)
-                    u_stage = solve_row_masked(jac, base, mask, gamma_dt)
-                    fe_stage, fi_stage = _split_batched_fn(
-                        u_stage, t_stage, params_batch
-                    )
-                    failed = (
-                        jnp.any(~jnp.isfinite(jac), axis=(1, 2))
-                        | jnp.any(~jnp.isfinite(u_stage), axis=1)
-                        | jnp.any(~jnp.isfinite(fe_stage), axis=1)
-                        | jnp.any(~jnp.isfinite(fi_stage), axis=1)
-                    )
-                    return u_stage, fe_stage, fi_stage, failed
-
-            elif linearise:
-
-                def _solve_stage(
-                    base,
-                    t_stage,
-                    dt,
-                    predictor,
-                    _split_batched_fn,
-                    _implicit_jac_batched,
-                ):
-                    del _split_batched_fn
-                    gamma_dt = dt * _GAMMA
-                    jac = _implicit_jac_batched(predictor, t_stage, params_batch)
-                    mask = jnp.any(jac != 0.0, axis=2)
-                    u_stage = solve_row_masked(jac, base, mask, gamma_dt)
-                    fi_stage = jnp.einsum("bij,bj->bi", jac, u_stage)
-                    f_full = _ode_batched(u_stage, t_stage, params_batch)
-                    fe_stage = f_full - fi_stage
-                    failed = (
-                        jnp.any(~jnp.isfinite(jac), axis=(1, 2))
-                        | jnp.any(~jnp.isfinite(u_stage), axis=1)
-                        | jnp.any(~jnp.isfinite(fe_stage), axis=1)
-                        | jnp.any(~jnp.isfinite(fi_stage), axis=1)
-                    )
-                    return u_stage, fe_stage, fi_stage, failed
-
-            else:
-
-                def _solve_stage(
-                    base,
-                    t_stage,
-                    dt,
-                    predictor,
-                    _split_batched_fn,
-                    _implicit_jac_batched,
-                ):
-                    gamma_dt = dt * _GAMMA
-
-                    # Evaluate J at the predictor once to detect which rows have
-                    # nonzero implicit coupling.  Rows with all-zero Jacobian rows
-                    # are "inactive": their implicit RHS is u-independent, so they
-                    # are resolved by direct substitution without entering Newton.
-                    jac_pred = _implicit_jac_batched(predictor, t_stage, params_batch)
-                    mask = jnp.any(jac_pred != 0.0, axis=2)  # (bs, n) per-trajectory
-
-                    def direct_fn(_):
-                        # All rows inactive: one f_impl eval, no LU, no loop.
-                        fe, fi = _split_batched_fn(predictor, t_stage, params_batch)
-                        u = base + gamma_dt[:, None] * fi
-                        return u, fe, fi, jnp.zeros((bs,), jnp.bool_)
-
-                    def newton_fn(_):
-                        def cond_fn(state):
-                            _, converged, failed, it = state
-                            return (jnp.any(~(converged | failed))) & (
-                                it < _NEWTON_MAX_ITERS
-                            )
-
-                        def body_fn(state):
-                            u, converged, failed, it = state
-                            _, fi = _split_batched_fn(u, t_stage, params_batch)
-                            res = u - base - gamma_dt[:, None] * fi
-                            jac = _implicit_jac_batched(u, t_stage, params_batch)
-                            # Reduced solve: inactive rows → delta_i = res_i (direct),
-                            # active rows → k×k Newton step with coupling correction.
-                            delta = solve_row_masked(jac, res, mask, gamma_dt)
-                            u_new = jnp.where(
-                                (converged | failed)[:, None],
-                                u,
-                                u - delta,
-                            )
-                            scale = atol + rtol * jnp.maximum(
-                                jnp.abs(u), jnp.abs(u_new)
-                            )
-                            delta_norm = jnp.sqrt(
-                                jnp.mean((delta / scale) ** 2, axis=1)
-                            )
-                            invalid = (
-                                jnp.any(~jnp.isfinite(u_new), axis=1)
-                                | jnp.any(~jnp.isfinite(delta), axis=1)
-                                | jnp.isnan(delta_norm)
-                            )
-                            converged_new = converged | ((delta_norm <= 1.0) & ~invalid)
-                            failed_new = failed | invalid
-                            return (u_new, converged_new, failed_new, it + 1)
-
-                        init = (
-                            predictor,
-                            jnp.zeros((bs,), dtype=jnp.bool_),
-                            jnp.zeros((bs,), dtype=jnp.bool_),
-                            jnp.int32(0),
-                        )
-                        u_final, converged, failed, _ = jax.lax.while_loop(
-                            cond_fn, body_fn, init
-                        )
-                        fe_final, fi_final = _split_batched_fn(
-                            u_final, t_stage, params_batch
-                        )
-                        failed = (
-                            failed
-                            | ~converged
-                            | jnp.any(~jnp.isfinite(fe_final), axis=1)
-                            | jnp.any(~jnp.isfinite(fi_final), axis=1)
-                        )
-                        return u_final, fe_final, fi_final, failed
-
-                    return jax.lax.cond(jnp.any(mask), newton_fn, direct_fn, None)
-
             def _step_batch(y, t, dt):
                 dt_col = dt[:, None]
 
@@ -488,6 +355,123 @@ def make_solver(
                     f_full = _ode_batched(u, t, params_batch)  # (bs, n)
                     fi = jnp.where(stiff_mask, f_full, 0.0)
                     return f_full - fi, fi
+
+                if linear:
+
+                    def _solve_stage(base, t_stage, dt, predictor):
+                        gamma_dt = dt * _GAMMA
+                        jac = _implicit_jac_batched(predictor, t_stage, params_batch)
+                        mask = jnp.any(jac != 0.0, axis=2)
+                        u_stage = solve_row_masked(jac, base, mask, gamma_dt)
+                        fe_stage, fi_stage = _split_batched(
+                            u_stage, t_stage, params_batch
+                        )
+                        failed = (
+                            jnp.any(~jnp.isfinite(jac), axis=(1, 2))
+                            | jnp.any(~jnp.isfinite(u_stage), axis=1)
+                            | jnp.any(~jnp.isfinite(fe_stage), axis=1)
+                            | jnp.any(~jnp.isfinite(fi_stage), axis=1)
+                        )
+                        return u_stage, fe_stage, fi_stage, failed
+
+                elif linearise:
+
+                    def _solve_stage(base, t_stage, dt, predictor):
+                        gamma_dt = dt * _GAMMA
+                        jac = _implicit_jac_batched(predictor, t_stage, params_batch)
+                        mask = jnp.any(jac != 0.0, axis=2)
+                        u_stage = solve_row_masked(jac, base, mask, gamma_dt)
+                        fi_stage = jnp.einsum("bij,bj->bi", jac, u_stage)
+                        f_full = _ode_batched(u_stage, t_stage, params_batch)
+                        fe_stage = f_full - fi_stage
+                        failed = (
+                            jnp.any(~jnp.isfinite(jac), axis=(1, 2))
+                            | jnp.any(~jnp.isfinite(u_stage), axis=1)
+                            | jnp.any(~jnp.isfinite(fe_stage), axis=1)
+                            | jnp.any(~jnp.isfinite(fi_stage), axis=1)
+                        )
+                        return u_stage, fe_stage, fi_stage, failed
+
+                else:
+
+                    def _solve_stage(base, t_stage, dt, predictor):
+                        gamma_dt = dt * _GAMMA
+
+                        # Evaluate J at the predictor once to detect which rows have
+                        # nonzero implicit coupling.  Rows with all-zero Jacobian rows
+                        # are "inactive": their implicit RHS is u-independent, so they
+                        # are resolved by direct substitution without entering Newton.
+                        jac_pred = _implicit_jac_batched(
+                            predictor, t_stage, params_batch
+                        )
+                        mask = jnp.any(
+                            jac_pred != 0.0, axis=2
+                        )  # (bs, n) per-trajectory
+
+                        def direct_fn(_):
+                            # All rows inactive: one f_impl eval, no LU, no loop.
+                            fe, fi = _split_batched(predictor, t_stage, params_batch)
+                            u = base + gamma_dt[:, None] * fi
+                            return u, fe, fi, jnp.zeros((bs,), jnp.bool_)
+
+                        def newton_fn(_):
+                            def cond_fn(state):
+                                _, converged, failed, it = state
+                                return (jnp.any(~(converged | failed))) & (
+                                    it < _NEWTON_MAX_ITERS
+                                )
+
+                            def body_fn(state):
+                                u, converged, failed, it = state
+                                _, fi = _split_batched(u, t_stage, params_batch)
+                                res = u - base - gamma_dt[:, None] * fi
+                                jac = _implicit_jac_batched(u, t_stage, params_batch)
+                                # Reduced solve: inactive rows -> delta_i = res_i (direct),
+                                # active rows -> k×k Newton step with coupling correction.
+                                delta = solve_row_masked(jac, res, mask, gamma_dt)
+                                u_new = jnp.where(
+                                    (converged | failed)[:, None],
+                                    u,
+                                    u - delta,
+                                )
+                                scale = atol + rtol * jnp.maximum(
+                                    jnp.abs(u), jnp.abs(u_new)
+                                )
+                                delta_norm = jnp.sqrt(
+                                    jnp.mean((delta / scale) ** 2, axis=1)
+                                )
+                                invalid = (
+                                    jnp.any(~jnp.isfinite(u_new), axis=1)
+                                    | jnp.any(~jnp.isfinite(delta), axis=1)
+                                    | jnp.isnan(delta_norm)
+                                )
+                                converged_new = converged | (
+                                    (delta_norm <= 1.0) & ~invalid
+                                )
+                                failed_new = failed | invalid
+                                return (u_new, converged_new, failed_new, it + 1)
+
+                            init = (
+                                predictor,
+                                jnp.zeros((bs,), dtype=jnp.bool_),
+                                jnp.zeros((bs,), dtype=jnp.bool_),
+                                jnp.int32(0),
+                            )
+                            u_final, converged, failed, _ = jax.lax.while_loop(
+                                cond_fn, body_fn, init
+                            )
+                            fe_final, fi_final = _split_batched(
+                                u_final, t_stage, params_batch
+                            )
+                            failed = (
+                                failed
+                                | ~converged
+                                | jnp.any(~jnp.isfinite(fe_final), axis=1)
+                                | jnp.any(~jnp.isfinite(fi_final), axis=1)
+                            )
+                            return u_final, fe_final, fi_final, failed
+
+                        return jax.lax.cond(jnp.any(mask), newton_fn, direct_fn, None)
 
                 # ------------------------------------------------------------------
                 # KenCarp5 stages
@@ -527,12 +511,7 @@ def make_solver(
                             predictor = predictor + coeff * stage_y[j]
 
                     y_stage, fe_stage, fi_stage, stage_failed = _solve_stage(
-                        base,
-                        t_stage,
-                        dt,
-                        predictor,
-                        _split_batched,
-                        _implicit_jac_batched,
+                        base, t_stage, dt, predictor
                     )
                     failed = (
                         failed
