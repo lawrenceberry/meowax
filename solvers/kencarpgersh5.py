@@ -286,14 +286,14 @@ def make_solver(
                             cond_fn, body_fn, init
                         )
                         fi_final = _implicit_batched(u_final, t_stage, params_batch)
-                        failed = failed | ~converged | jnp.any(
-                            ~jnp.isfinite(fi_final), axis=1
+                        failed = (
+                            failed
+                            | ~converged
+                            | jnp.any(~jnp.isfinite(fi_final), axis=1)
                         )
                         return u_final, fi_final, failed
 
-                    return jax.lax.cond(
-                        jnp.any(mask), newton_fn, direct_fn, None
-                    )
+                    return jax.lax.cond(jnp.any(mask), newton_fn, direct_fn, None)
 
             def _step_batch(y, t, dt):
                 dt_col = dt[:, None]
