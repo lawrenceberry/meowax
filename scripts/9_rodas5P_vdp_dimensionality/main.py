@@ -102,7 +102,7 @@ CASES: tuple[Case, ...] = (
     ),
     Case(
         key="modax rodas5P kernel fp32",
-        color="#8c564b",
+        color="#2ba84a",
         marker="P",
         linestyle="--",
         solve_fn=rodas5Pnumba_solve,
@@ -113,7 +113,7 @@ CASES: tuple[Case, ...] = (
     ),
     Case(
         key="modax rodas5P kernel fp64",
-        color="#8c564b",
+        color="#2ba84a",
         marker="X",
         solve_fn=rodas5Pnumba_solve,
         mode="custom",
@@ -123,7 +123,7 @@ CASES: tuple[Case, ...] = (
     ),
     Case(
         key="diffrax kvaerno5",
-        color="#2ba84a",
+        color="#1f77b4",
         marker="s",
         solve_fn=diffrax_kvaerno5_solve,
         mode="diffrax",
@@ -153,6 +153,11 @@ CASES: tuple[Case, ...] = (
         system_name="vdp",
         ensemble_backend="EnsembleGPUKernel",
     ),
+)
+
+
+PLOT_CASES: tuple[Case, ...] = tuple(
+    case for case in CASES if not case.key.startswith("modax rodas5P array")
 )
 
 
@@ -328,7 +333,7 @@ def main() -> None:
         rows = run_benchmarks(CASES, gpu_name, cache, scenario, divergence)
         csv_path, plot_path = _scenario_output_paths(gpu_name, scenario)
         save_csv(rows, csv_path)
-        plot(rows, CASES, gpu_name, plot_path, scenario)
+        plot(rows, PLOT_CASES, gpu_name, plot_path, scenario)
 
 
 if __name__ == "__main__":
